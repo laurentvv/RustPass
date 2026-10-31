@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Desktop GUI command-line options (`rustpass.exe`), compatible with `KeePassXC.exe` flags.
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 #[command(
     name = "rustpass",
     version,
@@ -31,6 +31,10 @@ pub struct GuiCliArgs {
     /// Open directly with the interactive KDBX 4.0 Showcase Vault loaded.
     #[arg(long = "showcase")]
     pub showcase: bool,
+
+    /// Optional modal to open immediately on launch (`generator`, `audit`, `editor`, `shortcuts`, `settings`, `palette`).
+    #[arg(long = "open-modal")]
+    pub open_modal: Option<String>,
 }
 
 /// Drop-in `keepassxc-cli` compatible command-line tool (`rustpass-cli.exe`).

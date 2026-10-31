@@ -227,6 +227,82 @@ impl RustPassApp {
             }
         }
 
+        if let Some(ref m) = cli_args.open_modal {
+            match m.to_lowercase().as_str() {
+                "generator" => app.generator_modal.open = true,
+                "audit" => app.trigger_action(PaletteAction::OpenSecurityAudit),
+                "editor" => app.trigger_action(PaletteAction::AddEntry),
+                "shortcuts" => app.show_shortcuts = true,
+                "settings" => app.trigger_action(PaletteAction::OpenDbSettings),
+                "palette" => app.cmd_palette.show(),
+                _ => {}
+            }
+        }
+
+        app
+    }
+
+    /// Initializes `RustPassApp` for testing without an `eframe::CreationContext`.
+    #[cfg(test)]
+    pub fn new_for_test(ctx: &egui::Context, cli_args: GuiCliArgs) -> Self {
+        configure_fonts(ctx);
+        let settings = AppSettings::default();
+        let palette = apply_theme(ctx, settings.theme);
+
+        let gen_modal = GeneratorModal::new(
+            settings.password_generator.clone(),
+            settings.diceware_generator.clone(),
+        );
+
+        let mut app = Self {
+            settings,
+            palette,
+            sessions: Vec::new(),
+            active_tab: 0,
+            welcome_mode: WelcomeMode::UnlockExisting,
+            welcome_db_path: String::new(),
+            welcome_keyfile_path: String::new(),
+            welcome_vault_name: "Personal Vault".to_string(),
+            welcome_pw: String::new(),
+            welcome_pw_confirm: String::new(),
+            welcome_show_pw: false,
+            welcome_error: None,
+            focus_search_next: false,
+            status_message: "Ready — KDBX 4.0 & 3.1 Clean-Room Engine".to_string(),
+            last_interaction: Instant::now(),
+            clipboard_guard: None,
+            cmd_palette: CommandPaletteState::default(),
+            entry_editor: EntryEditorModal::default(),
+            generator_modal: gen_modal,
+            audit_modal: SecurityAuditModal::default(),
+            db_settings_modal: DbSettingsModal::default(),
+            show_shortcuts: false,
+            show_about: false,
+        };
+
+        if let Some(kf) = cli_args.keyfile {
+            app.welcome_keyfile_path = kf.display().to_string();
+        }
+        if let Some(db_path) = cli_args.database {
+            app.welcome_db_path = db_path.display().to_string();
+        }
+        if cli_args.showcase {
+            app.open_showcase_demo_vault();
+            if let Some(sess) = app.sessions.first_mut() {
+                sess.show_inspector_qr = true;
+            }
+        }
+        if let Some(ref m) = cli_args.open_modal {
+            match m.to_lowercase().as_str() {
+                "generator" => app.generator_modal.open = true,
+                "audit" => app.trigger_action(PaletteAction::OpenSecurityAudit),
+                "editor" => app.trigger_action(PaletteAction::AddEntry),
+                "shortcuts" => app.show_shortcuts = true,
+                "settings" => app.trigger_action(PaletteAction::OpenDbSettings),
+                "palette" => app.cmd_palette.show(),
+                _ => {}
+            }
+        }
         app
     }
 
@@ -717,17 +793,9 @@ impl RustPassApp {
     }
 }
 
-impl eframe::App for RustPassApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_clipboard_and_autolock(ctx);
-        self.handle_shortcuts(ctx);
-
-        if self.settings.theme == ThemeChoice::FollowSystem {
-            self.palette = apply_theme(ctx, ThemeChoice::FollowSystem);
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl RustPassApp {
+    /// Renders the complete application layout (top bars, status bar, active view, and open modals).
+    pub fn render_frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
         self.render_top_bars(ui, &ctx);
@@ -797,6 +865,21 @@ impl eframe::App for RustPassApp {
 
         show_shortcuts_window(&ctx, &mut self.show_shortcuts);
         show_about_window(&ctx, &mut self.show_about, &self.palette);
+    }
+}
+
+impl eframe::App for RustPassApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_clipboard_and_autolock(ctx);
+        self.handle_shortcuts(ctx);
+
+        if self.settings.theme == ThemeChoice::FollowSystem {
+            self.palette = apply_theme(ctx, ThemeChoice::FollowSystem);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render_frame(ui);
     }
 }
 
@@ -2154,5 +2237,433 @@ fn render_group_tree_node(
 
     for child in &group.children {
         render_group_tree_node(ui, child, recycle_bin_uuid, depth + 1, filter);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keyfile::write_new_keyfile;
+    use crate::model::{CipherAlgorithm, CustomAttribute};
+
+    fn temp_test_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rustpass_gui_{}_{}_{name}",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn test_gui_welcome_screen_and_database_creation() {
+        let ctx = egui::Context::default();
+        let mut app = RustPassApp::new_for_test(&ctx, GuiCliArgs::default());
+
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.welcome_mode, WelcomeMode::UnlockExisting);
+
+        // Switch to create mode
+        app.welcome_mode = WelcomeMode::CreateNew;
+        app.welcome_vault_name = "My Personal Vault".to_string();
+
+        let db_file = temp_test_file("create_test.kdbx");
+        app.welcome_db_path = db_file.display().to_string();
+
+        // 1. Password mismatch validation
+        app.welcome_pw = "Secret#12345".to_string();
+        app.welcome_pw_confirm = "Secret#Different".to_string();
+        app.submit_welcome_form();
+
+        assert_eq!(
+            app.welcome_error.as_deref(),
+            Some("Master passwords do not match.")
+        );
+        assert!(app.sessions.is_empty());
+
+        // 2. Successful creation with keyfile
+        let key_file = temp_test_file("vault.keyx");
+        write_new_keyfile(&key_file, true).expect("write keyfile");
+        app.welcome_keyfile_path = key_file.display().to_string();
+
+        app.welcome_pw = "Secret#12345".to_string();
+        app.welcome_pw_confirm = "Secret#12345".to_string();
+        app.submit_welcome_form();
+
+        assert!(app.welcome_error.is_none());
+        assert_eq!(app.sessions.len(), 1);
+        assert!(db_file.is_file());
+
+        let sess = app.active_session().expect("active session");
+        assert_eq!(sess.path, Some(db_file.clone()));
+        assert!(!sess.dirty);
+
+        let db = sess.db.as_ref().expect("opened database");
+        assert_eq!(db.meta.database_name, "My Personal Vault");
+        assert_eq!(db.root.name, "My Personal Vault");
+
+        // Verify default folders were created
+        let group_names: Vec<&str> = db.root.children.iter().map(|g| g.name.as_str()).collect();
+        assert!(group_names.contains(&"General"));
+        assert!(group_names.contains(&"Internet"));
+        assert!(group_names.contains(&"Infrastructure"));
+        assert!(group_names.contains(&"Finance"));
+
+        let _ = std::fs::remove_file(&db_file);
+        let _ = std::fs::remove_file(&key_file);
+    }
+
+    #[test]
+    fn test_gui_group_creation_and_nested_hierarchy() {
+        let ctx = egui::Context::default();
+        let mut app = RustPassApp::new_for_test(
+            &ctx,
+            GuiCliArgs {
+                showcase: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.sessions.len(), 1);
+
+        let sess = app.active_session_mut().expect("active session");
+        let db = sess.db.as_mut().expect("db");
+
+        // 1. Add group under root
+        let root_id = db.root.uuid;
+        sess.sidebar_filter = SidebarFilter::Group(root_id);
+        sess.new_group_prompt = Some("SecOps".to_string());
+
+        // Simulate Add button click
+        let name = sess.new_group_prompt.take().unwrap();
+        let parent = db.root.find_group_by_uuid_mut(root_id).expect("root");
+        parent.children.push(Group::new(name));
+        sess.dirty = true;
+
+        let secops_grp = db
+            .root
+            .children
+            .iter()
+            .find(|g| g.name == "SecOps")
+            .expect("SecOps");
+        let secops_id = secops_grp.uuid;
+
+        // 2. Add nested group under SecOps
+        sess.sidebar_filter = SidebarFilter::Group(secops_id);
+        sess.new_group_prompt = Some("Kubernetes".to_string());
+
+        let nested_name = sess.new_group_prompt.take().unwrap();
+        let parent = db.root.find_group_by_uuid_mut(secops_id).expect("secops");
+        parent.children.push(Group::new(nested_name));
+
+        let k8s_grp = db
+            .root
+            .find_group_by_uuid(secops_id)
+            .unwrap()
+            .children
+            .iter()
+            .find(|g| g.name == "Kubernetes")
+            .expect("k8s");
+        assert_eq!(k8s_grp.name, "Kubernetes");
+        assert!(sess.dirty);
+    }
+
+    #[test]
+    fn test_gui_entry_editor_modal_and_apply_saved_entry() {
+        let ctx = egui::Context::default();
+        let mut app = RustPassApp::new_for_test(
+            &ctx,
+            GuiCliArgs {
+                showcase: true,
+                ..Default::default()
+            },
+        );
+
+        let target_group = app
+            .active_session()
+            .unwrap()
+            .db
+            .as_ref()
+            .unwrap()
+            .root
+            .children[0]
+            .uuid;
+        let gen_opts = app.settings.password_generator.clone();
+
+        // 1. Open new entry editor
+        app.entry_editor
+            .open_new(target_group, "admin@corp", &gen_opts);
+        assert!(app.entry_editor.open);
+        assert!(app.entry_editor.is_new);
+        assert_eq!(app.entry_editor.draft.username, "admin@corp");
+
+        // 2. Populate entry details
+        app.entry_editor.draft.title = "Production Ingress".to_string();
+        app.entry_editor.password_plain = "ClusterSecret#2026!".to_string();
+        app.entry_editor.draft.url = "https://ingress.corp.internal".to_string();
+        app.entry_editor.draft.notes = "Primary Gateway".to_string();
+        app.entry_editor.tags_csv = "k8s, prod, network".to_string();
+        app.entry_editor.otp_raw = "JBSWY3DPEHPK3PXP".to_string();
+
+        // 3. Add custom attribute
+        app.entry_editor
+            .draft
+            .custom_attributes
+            .push(CustomAttribute {
+                key: "AccessTier".to_string(),
+                value: ProtectedString::new("Level-4"),
+                protected: true,
+            });
+
+        // 4. Add attachment
+        app.entry_editor.draft.attachments.push(Attachment {
+            name: "ingress_cert.pem".to_string(),
+            data: b"CERT_DATA_BYTES".to_vec(),
+            protected: false,
+        });
+
+        // 5. Submit modal
+        app.entry_editor.draft.password = ProtectedString::new(&app.entry_editor.password_plain);
+        app.entry_editor.draft.otp = Some(ProtectedString::new(&app.entry_editor.otp_raw));
+        app.entry_editor.draft.tags = app
+            .entry_editor
+            .tags_csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        let payload = SavedEntryPayload {
+            is_new: true,
+            target_group_uuid: target_group,
+            entry: app.entry_editor.draft.clone(),
+        };
+        app.entry_editor.open = false;
+
+        let entry_uuid = payload.entry.uuid;
+        let sess = app.active_session_mut().unwrap();
+        let db = sess.db.as_mut().unwrap();
+        apply_saved_entry(db, payload, &mut sess.selected_entry);
+
+        assert_eq!(sess.selected_entry, Some(entry_uuid));
+        let created = db
+            .root
+            .find_entry_by_uuid(entry_uuid)
+            .expect("created entry");
+        assert_eq!(created.title, "Production Ingress");
+        assert_eq!(created.username, "admin@corp");
+        assert_eq!(created.password.as_str(), "ClusterSecret#2026!");
+        assert_eq!(created.tags, vec!["k8s", "prod", "network"]);
+        assert_eq!(created.attachments.len(), 1);
+        assert_eq!(created.attachments[0].name, "ingress_cert.pem");
+
+        // Verify live TOTP generation works for this created entry
+        let totp = TotpConfig::from_entry(created).expect("valid totp config");
+        let (code, remaining) = totp.generate_now().expect("totp token");
+        assert_eq!(code.len(), 6);
+        assert!(remaining <= 30);
+    }
+
+    #[test]
+    fn test_gui_entry_edit_version_history_and_cloning() {
+        let ctx = egui::Context::default();
+        let mut app = RustPassApp::new_for_test(
+            &ctx,
+            GuiCliArgs {
+                showcase: true,
+                ..Default::default()
+            },
+        );
+
+        let sess = app.active_session_mut().expect("active session");
+        let db = sess.db.as_mut().expect("db");
+        let orig_entry_id = sess.selected_entry.expect("selected entry");
+        let orig_entry = db
+            .root
+            .find_entry_by_uuid(orig_entry_id)
+            .expect("entry")
+            .clone();
+
+        assert_eq!(orig_entry.history.len(), 0);
+
+        // 1. Edit entry (change password)
+        let mut edited = orig_entry.clone();
+        edited.password = ProtectedString::new("NewUpdatedPassword#2026!");
+
+        let payload = SavedEntryPayload {
+            is_new: false,
+            target_group_uuid: db.root.uuid,
+            entry: edited,
+        };
+        apply_saved_entry(db, payload, &mut sess.selected_entry);
+
+        let updated = db
+            .root
+            .find_entry_by_uuid(orig_entry_id)
+            .expect("updated entry");
+        assert_eq!(updated.password.as_str(), "NewUpdatedPassword#2026!");
+        assert_eq!(updated.history.len(), 1);
+        assert_eq!(
+            updated.history[0].password.as_str(),
+            orig_entry.password.as_str()
+        );
+
+        // 2. Clone entry
+        app.trigger_action(PaletteAction::CloneEntry);
+        let cloned_id = app
+            .active_session()
+            .unwrap()
+            .selected_entry
+            .expect("cloned entry");
+        assert_ne!(cloned_id, orig_entry_id);
+
+        let db = app.active_session().unwrap().db.as_ref().unwrap();
+        let cloned = db.root.find_entry_by_uuid(cloned_id).expect("cloned");
+        assert!(cloned.title.ends_with("(Copy)"));
+        assert_eq!(cloned.history.len(), 0);
+
+        // 3. Delete original entry (moves to recycle bin)
+        let sess = app.active_session_mut().unwrap();
+        sess.selected_entry = Some(orig_entry_id);
+        app.trigger_action(PaletteAction::DeleteEntry);
+
+        let db = app.active_session().unwrap().db.as_ref().unwrap();
+        // Entry is no longer in active engineering group
+        let bin_uuid = db.meta.recycle_bin_uuid;
+        assert!(!bin_uuid.is_nil());
+        let bin = db.root.find_group_by_uuid(bin_uuid).expect("recycle bin");
+        assert!(bin.find_entry_by_uuid(orig_entry_id).is_some());
+    }
+
+    #[test]
+    fn test_gui_generator_audit_settings_modals() {
+        let ctx = egui::Context::default();
+        let mut app = RustPassApp::new_for_test(
+            &ctx,
+            GuiCliArgs {
+                showcase: true,
+                ..Default::default()
+            },
+        );
+
+        // 1. Password Generator modal
+        app.generator_modal.open = true;
+        app.generator_modal.pw_opts.length = 32;
+        app.generator_modal.pw_opts.lowercase = true;
+        app.generator_modal.pw_opts.uppercase = true;
+        app.generator_modal.pw_opts.numbers = true;
+        app.generator_modal.pw_opts.special = true;
+        app.generator_modal.pw_opts.ensure_every_group = true;
+        app.generator_modal.regenerate();
+
+        assert_eq!(app.generator_modal.current_output.len(), 32);
+        let est = estimate_password(&app.generator_modal.current_output);
+        assert!(est.entropy_bits >= 160.0);
+
+        // 2. Security Audit modal
+        app.trigger_action(PaletteAction::OpenSecurityAudit);
+        assert!(app.audit_modal.open);
+        assert!(app.audit_modal.report.is_some());
+        let rep = app.audit_modal.report.as_ref().unwrap();
+        assert!(rep.total_entries >= 5);
+        assert!(rep.weak_count >= 1);
+        assert!(rep.http_count >= 1);
+
+        // 3. Database Settings modal
+        app.trigger_action(PaletteAction::OpenDbSettings);
+        assert!(app.db_settings_modal.open);
+        assert_eq!(app.db_settings_modal.cipher, CipherAlgorithm::ChaCha20);
+        app.db_settings_modal.cipher = CipherAlgorithm::Aes256Cbc;
+        app.db_settings_modal.argon2_mib = 128;
+        app.db_settings_modal.argon2_iterations = 4;
+
+        let new_cipher = app.db_settings_modal.cipher;
+        let sess = app.active_session_mut().unwrap();
+        let db = sess.db.as_mut().unwrap();
+        db.cipher = new_cipher;
+        assert_eq!(db.cipher, CipherAlgorithm::Aes256Cbc);
+    }
+
+    #[test]
+    fn test_gui_lock_and_unlock_flow() {
+        let ctx = egui::Context::default();
+        let db_file = temp_test_file("lock_test.kdbx");
+
+        let mut app = RustPassApp::new_for_test(&ctx, GuiCliArgs::default());
+        app.welcome_mode = WelcomeMode::CreateNew;
+        app.welcome_vault_name = "Lockable Vault".to_string();
+        app.welcome_db_path = db_file.display().to_string();
+        app.welcome_pw = "LockMaster#2026!".to_string();
+        app.welcome_pw_confirm = "LockMaster#2026!".to_string();
+        app.submit_welcome_form();
+
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.active_session().unwrap().db.is_some());
+
+        // 1. Lock vault
+        app.trigger_action(PaletteAction::LockVault);
+        assert!(app.active_session().unwrap().db.is_none());
+
+        // 2. Unlock with wrong password
+        let sess = app.active_session_mut().unwrap();
+        sess.unlock_pw_buf = "WrongPassword".to_string();
+        let creds_fail = MasterCredentials::with_password(&sess.unlock_pw_buf);
+        let open_res = Database::open(&db_file, &creds_fail);
+        assert!(open_res.is_err());
+
+        // 3. Unlock with correct password
+        sess.unlock_pw_buf = "LockMaster#2026!".to_string();
+        let creds_ok = MasterCredentials::with_password(&sess.unlock_pw_buf);
+        let db = Database::open(&db_file, &creds_ok).expect("unlock ok");
+        sess.db = Some(db);
+        sess.credentials = creds_ok;
+        sess.unlock_pw_buf.clear();
+
+        assert!(app.active_session().unwrap().db.is_some());
+
+        let _ = std::fs::remove_file(&db_file);
+    }
+
+    #[test]
+    fn test_gui_render_frame_simulation_without_panics() {
+        let ctx = egui::Context::default();
+        let mut app = RustPassApp::new_for_test(
+            &ctx,
+            GuiCliArgs {
+                showcase: true,
+                ..Default::default()
+            },
+        );
+
+        let render_pass = |app: &mut RustPassApp| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.render_frame(ui);
+            });
+            output.textures_delta.clear();
+        };
+
+        // Simulate frame render 1: Unlocked 3-pane layout
+        render_pass(&mut app);
+
+        // Simulate frame render 2: Generator Modal open
+        app.generator_modal.open = true;
+        render_pass(&mut app);
+        app.generator_modal.open = false;
+
+        // Simulate frame render 3: Entry Editor open
+        app.entry_editor.open = true;
+        render_pass(&mut app);
+        app.entry_editor.open = false;
+
+        // Simulate frame render 4: Security Audit open
+        app.audit_modal.open = true;
+        render_pass(&mut app);
+        app.audit_modal.open = false;
+
+        // Simulate frame render 5: DB Settings open
+        app.db_settings_modal.open = true;
+        render_pass(&mut app);
+        app.db_settings_modal.open = false;
+
+        // Simulate frame render 6: Welcome Screen
+        app.sessions.clear();
+        render_pass(&mut app);
     }
 }
