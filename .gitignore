@@ -1,0 +1,9 @@
+/target/
+/.agent/
+/.agents/
+/.scratch/
+*.kdbx
+*.keyx
+*.tmp
+*.wixpdb
+*.msi
