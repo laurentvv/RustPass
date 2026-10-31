@@ -5,3 +5,24 @@
 *.wxs text eol=crlf
 *.ico binary
 *.kdbx binary
+
+# agents-kit skill installs: byte-frozen (LF), binary assets and CRLF launchers
+# untouched (same ordering as agents-kit: the -text overrides below MUST stay
+# after the skills line, else checkout corrupts blobs / breaks fingerprints)
+.agents/skills/** text eol=lf
+.agent/*.duckdb* binary
+*.jpg -text
+*.jpeg -text
+*.png -text
+*.gif -text
+*.webp -text
+*.mp4 -text
+*.mp3 -text
+*.wav -text
+*.m4a -text
+*.woff -text
+*.woff2 -text
+*.ttf -text
+*.otf -text
+*.cmd -text
+*.bat -text

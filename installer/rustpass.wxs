@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="RustPass"
+    Manufacturer="Laurent VOLFF"
+    Version="0.1.0"
+    UpgradeCode="94B2D810-4D3C-4E91-9A2E-8C71E5A03F12"
+    Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of RustPass is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="RustPassIcon" SourceFile="..\assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="RustPassIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="RustPass">
+        <Component Id="MainBinaries" Guid="3F6B9104-6A82-47D1-8B53-7192A4C60E15">
+          <File Id="RustPassGuiExe" Source="..\target\release\rustpass.exe" KeyPath="yes" />
+          <File Id="RustPassCliExe" Source="..\target\release\rustpass-cli.exe" />
+          <File Id="RustPassProxyExe" Source="..\target\release\rustpass-proxy.exe" />
+          <ProgId Id="RustPass.kdbx" Description="KeePass KDBX Password Database" Icon="RustPassGuiExe">
+            <Extension Id="kdbx" ContentType="application/x-keepass2">
+              <Verb Id="open" Command="Open with RustPass" TargetFile="RustPassGuiExe" Argument="&quot;%1&quot;" />
+            </Extension>
+          </ProgId>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature" Title="RustPass Suite (GUI, CLI, Browser Proxy)" Level="1">
+      <ComponentRef Id="MainBinaries" />
+    </Feature>
+  </Package>
+</Wix>

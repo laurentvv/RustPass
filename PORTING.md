@@ -1,0 +1,38 @@
+# Clean-Room Porting Notes — KeePassXC 2.8.0 → `RustPass`
+
+## 1. Clean-Room Methodology
+
+`RustPass` was engineered via the **REAP (`universal-asset-ripper` + `clean-room-port`)** black-box reconnaissance workflow against an installed Windows x86_64 binary distribution of **KeePassXC 2.8.0** (`C:\Program Files\KeePassXC`).
+
+1. **Zero Upstream Source Inspection**: No GPLv2/GPLv3 C++ source files from KeePassXC were read, translated, or copied, and no icons, translations (`.qm`), or UI assets from `C:\Program Files\KeePassXC` are embedded in this repository.
+2. **Public Format & Cryptographic Specifications**:
+   - KeePass KDBX 3.1 & KDBX 4.0/4.1 binary container specification (magic signature `0x9AA2D903 0xB54BFB67`, outer TLV headers, `VariantDictionary`, SHA-256 + HMAC-SHA-256 header authentication, 64-byte per-block derived HMAC-SHA-256 block stream, GZip inner header + `KeePassFile` XML schema, Base64 `i64 LE` timestamps from `0001-01-01T00:00:00Z`).
+   - Key File v2.0 `.keyx` XML schema (`SHA-256(key)[0..4]` uppercase hex `Hash` attribute) and v1.00 / hex / raw / SHA-256 keyfile derivation.
+   - IETF RFC 4226 (HOTP), RFC 6238 (TOTP), RFC 8439 (ChaCha20), RFC 9106 (Argon2), RFC 4180 (CSV), and ISO/IEC 18004 (QR Code Byte mode + GF(256) Reed-Solomon ECC).
+3. **Black-Box Surface Verification**:
+   - All 25 subcommands of `keepassxc-cli.exe` were inventoried via `--help` output and cross-tested via `tests/cli_integration.rs` in both directions (`keepassxc-cli` → `rustpass-cli` and `rustpass-cli` → `keepassxc-cli`).
+
+---
+
+## 2. Architectural Mapping (C++17 / Qt6 / Botan3 → Safe Rust 2024)
+
+| KeePassXC Subsystem | Upstream Stack | `RustPass` Clean-Room Module |
+| :--- | :--- | :--- |
+| Container & XML | QtXml + `z.dll` + `botan-3.dll` | `src/kdbx/{header,variant_dict,xml,mod}.rs` (`roxmltree` + `flate2`) |
+| Cryptography & KDF | `botan-3.dll` (C++) | `src/crypto/{kdf,cipher,hmac_stream,keyfile}.rs` (`argon2`, `chacha20`, `aes`, `cbc`, `salsa20`, `hmac`, `sha2`, `zeroize`) |
+| 2FA & QR Rendering | `Totp` + `qrencode.dll` (C) | `src/totp/{mod,qr}.rs` (pure-Rust RFC 6238 + Steam + ISO/IEC 18004 QR) |
+| Password / Passphrase | `PasswordGenerator` + `Diceware` | `src/generator/{mod,wordlist}.rs` (rejection-sampled OS CSPRNG) |
+| Search & Health Reports | `SearchParser` + `PasswordHealth` | `src/search/mod.rs` & `src/health/mod.rs` (incl. offline HIBP SHA-1 scan) |
+| Auto-Type | `AutoTypeWindows` (`user32.dll`) | `src/autotype/mod.rs` (`windows-sys` Unicode `SendInput`) |
+| Desktop UI | `Qt6Widgets.dll` (~45 MB runtime) | `src/app.rs` + `src/ui/*` (`egui`/`eframe` 0.37 single self-contained `.exe`) |
+| CLI & Browser Host | `keepassxc-cli.exe`, `keepassxc-proxy.exe` | `src/bin/rustpass-cli.rs`, `src/bin/rustpass-proxy.rs` |
+
+---
+
+## 3. Intentional Scope Exclusions
+
+To keep `RustPass` self-contained, auditable, and free of hardware/driver dependencies, the following hardware/network integrations are explicitly out of scope and report `UnsupportedFeature` when requested:
+
+- **Hardware YubiKey USB HID Challenge-Response (`-y / --yubikey`)**: Requires `libyubikey` / Windows USB HID smartcard drivers; `.keyx` 256-bit key files are supported instead.
+- **KeeShare Signed Container Sync & Freedesktop Secret Service (`org.freedesktop.secrets`)**: Linux D-Bus specific or multi-user PKI sharing workflows; standard UUID+timestamp KDBX `merge` is supported in both GUI and CLI.
+- **Built-in SSH Agent (`Pageant` / Named Pipe)**: Dedicated SSH key management lives in sibling repository `cuty-ssh`; SSH keys can be stored as protected KDBX 4 Inner Header binary attachments.
