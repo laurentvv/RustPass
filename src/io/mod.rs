@@ -45,7 +45,7 @@ pub fn export_database(db: &Database, format: ExportFormat) -> Result<String> {
                 },
                 &mut stream,
             )?;
-            Ok(xml)
+            Ok(xml.to_string())
         }
         ExportFormat::Csv => Ok(export_csv(db)),
         ExportFormat::Html => Ok(export_html(db)),

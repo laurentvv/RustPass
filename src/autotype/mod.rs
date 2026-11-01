@@ -18,6 +18,8 @@ pub enum AutoTypeAction {
     VirtualKey(VirtualSpecialKey),
     /// Pause execution for `ms` milliseconds.
     DelayMs(u64),
+    /// Clear the focused input field (`Ctrl+A` then `Delete`, the `{CLEARFIELD}` placeholder).
+    ClearField,
 }
 
 /// Special non-character keys supported in Auto-Type sequences.
@@ -126,17 +128,18 @@ pub fn compile_autotype_sequence(
                 "ESC" | "ESCAPE" => {
                     actions.push(AutoTypeAction::VirtualKey(VirtualSpecialKey::Escape))
                 }
-                "CLEARFIELD" => {
-                    // Standard KeePass CLEARFIELD: simple Pause + Backspace fallback
-                    actions.push(AutoTypeAction::DelayMs(50));
-                }
+                "CLEARFIELD" => actions.push(AutoTypeAction::ClearField),
                 other => {
                     if let Some(ms_str) = other
                         .strip_prefix("DELAY=")
                         .or_else(|| other.strip_prefix("DELAY "))
                     {
-                        let ms = ms_str.trim().parse::<u64>().unwrap_or(100).min(10_000);
-                        actions.push(AutoTypeAction::DelayMs(ms));
+                        let ms = ms_str.trim().parse::<u64>().map_err(|_| {
+                            RustPassError::InvalidArgument(format!(
+                                "Malformed Auto-Type delay value: {{{token}}}"
+                            ))
+                        })?;
+                        actions.push(AutoTypeAction::DelayMs(ms.min(10_000)));
                     } else if let Some(attr_name) = token
                         .trim()
                         .strip_prefix("S:")
@@ -145,6 +148,14 @@ pub fn compile_autotype_sequence(
                         && !val.is_empty()
                     {
                         actions.push(AutoTypeAction::Text(Zeroizing::new(val.to_string())));
+                    } else if !token.trim().is_empty()
+                        && !token.trim().to_ascii_uppercase().starts_with("S:")
+                    {
+                        // A typo like {PASWORD} would silently type no password and
+                        // submit the form with it missing — refuse loudly instead.
+                        return Err(RustPassError::InvalidArgument(format!(
+                            "Unknown Auto-Type placeholder: {{{token}}}"
+                        )));
                     }
                 }
             }
@@ -235,10 +246,14 @@ fn execute_autotype_windows(
                 core::mem::size_of::<INPUT>() as i32,
             )
         };
-        if sent == 0 {
-            return Err(RustPassError::UnsupportedFeature(
-                "Windows SendInput blocked by UIPI or locked desktop".to_string(),
-            ));
+        // `SendInput` returns the count of injected events: a partial injection (e.g.
+        // Alt down but not up) leaves modifier keys logically held and would turn the
+        // following keystrokes into menu accelerators in the wrong window.
+        if sent != batch.len() as u32 {
+            return Err(RustPassError::UnsupportedFeature(format!(
+                "Windows SendInput injected only {sent}/{} events (blocked by UIPI or locked desktop)",
+                batch.len()
+            )));
         }
         Ok(())
     };
@@ -268,6 +283,21 @@ fn execute_autotype_windows(
                     VirtualSpecialKey::Escape => VK_ESCAPE,
                 };
                 send_batch(&[make_vk(vk, false), make_vk(vk, true)])?;
+                thread::sleep(Duration::from_millis(25));
+            }
+            AutoTypeAction::ClearField => {
+                // Select everything in the focused control, then delete it.
+                const VK_CONTROL: u16 = 0x11;
+                const VK_A: u16 = 0x41;
+                const VK_DELETE: u16 = 0x2E;
+                send_batch(&[
+                    make_vk(VK_CONTROL, false),
+                    make_vk(VK_A, false),
+                    make_vk(VK_A, true),
+                    make_vk(VK_CONTROL, true),
+                ])?;
+                thread::sleep(Duration::from_millis(25));
+                send_batch(&[make_vk(VK_DELETE, false), make_vk(VK_DELETE, true)])?;
                 thread::sleep(Duration::from_millis(25));
             }
             AutoTypeAction::Text(secret) => {

@@ -69,6 +69,32 @@ pub enum RustPassError {
     /// Zip-Slip / Path Traversal defense triggered during attachment or export writing.
     #[error("SecurityError: {0}")]
     SecurityError(String),
+
+    /// OS clipboard could not be read or written (e.g. locked by another process).
+    #[error("Clipboard error: {0}")]
+    Clipboard(String),
+
+    /// Wraps an error with the operation context (usually the file path) that failed,
+    /// so messages name the culprit instead of a bare OS error.
+    #[error("{context}: {source}")]
+    WithContext {
+        /// What operation / which path failed.
+        context: String,
+        /// The underlying error.
+        #[source]
+        source: Box<RustPassError>,
+    },
+}
+
+impl RustPassError {
+    /// Attaches `context` (e.g. `opening <path>`) to this error for better messages.
+    #[must_use]
+    pub fn with_context(self, context: impl Into<String>) -> Self {
+        Self::WithContext {
+            context: context.into(),
+            source: Box::new(self),
+        }
+    }
 }
 
 /// Validates that `entry_name` resolves strictly inside `dest_dir` with no path traversal (`..`,
@@ -76,7 +102,7 @@ pub enum RustPassError {
 pub fn assert_safe_output_path(dest_dir: &Path, entry_name: &str) -> Result<PathBuf> {
     if entry_name.is_empty() || entry_name.contains('\0') {
         return Err(RustPassError::SecurityError(
-            "Tentative de Path Traversal détectée dans l'archive".to_string(),
+            "Path traversal attempt detected in output file name".to_string(),
         ));
     }
 
@@ -86,7 +112,7 @@ pub fn assert_safe_output_path(dest_dir: &Path, entry_name: &str) -> Result<Path
             Component::Normal(_) | Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(RustPassError::SecurityError(
-                    "Tentative de Path Traversal détectée dans l'archive".to_string(),
+                    "Path traversal attempt detected in output file name".to_string(),
                 ));
             }
         }
@@ -100,7 +126,7 @@ pub fn assert_safe_output_path(dest_dir: &Path, entry_name: &str) -> Result<Path
     let joined = base.join(rel);
     if !joined.starts_with(&base) {
         return Err(RustPassError::SecurityError(
-            "Tentative de Path Traversal détectée dans l'archive".to_string(),
+            "Path traversal attempt detected in output file name".to_string(),
         ));
     }
     Ok(joined)

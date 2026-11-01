@@ -78,14 +78,49 @@ pub struct BrowserLoginEntry {
     pub group: String,
 }
 
-/// Processes a `KeePassXC-Browser` JSON request against an optional unlocked `Database`.
+/// Session context for processing browser requests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BrowserSession<'a> {
+    /// Optional unlocked `Database`.
+    pub db: Option<&'a Database>,
+    /// Explicit opt-in to return plaintext credentials from `get-logins`.
+    ///
+    /// The KeePassXC-Browser encrypted channel (NaCl box over `change-public-keys`) is
+    /// not implemented, so by default credentials are **never** returned: any local
+    /// process that reaches the Native Messaging pipe must not be able to read vault
+    /// passwords. This flag exists for documented local integration tests only.
+    pub allow_plaintext_logins: bool,
+}
+
+impl<'a> BrowserSession<'a> {
+    /// Session over an optional database with plaintext logins refused.
+    #[must_use]
+    pub fn new(db: Option<&'a Database>) -> Self {
+        Self {
+            db,
+            allow_plaintext_logins: false,
+        }
+    }
+}
+
+/// Processes a `KeePassXC-Browser` JSON request against a [`BrowserSession`].
 #[must_use]
-pub fn handle_browser_message(req_val: &Value, open_db: Option<&Database>) -> Value {
+pub fn handle_browser_message(req_val: &Value, session: &BrowserSession<'_>) -> Value {
     let action = req_val
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let nonce = req_val.get("nonce").and_then(Value::as_str).unwrap_or("");
+    let open_db = session.db;
+
+    let no_encrypted_channel = || {
+        json!({
+            "action": action,
+            "error": "rustpass-proxy does not implement the encrypted KeePassXC-Browser channel; credentials are never returned in plaintext",
+            "errorCode": "15",
+            "nonce": nonce,
+        })
+    };
 
     match action {
         "ping" => json!({
@@ -122,20 +157,20 @@ pub fn handle_browser_message(req_val: &Value, open_db: Option<&Database>) -> Va
                 "nonce": nonce,
             }),
         },
-        "test-associate" | "associate" => match open_db {
-            Some(db) => json!({
-                "action": action,
-                "id": db.root.uuid.to_string(),
-                "nonce": nonce,
-                "success": "true",
-            }),
-            None => json!({
-                "action": action,
-                "error": "Database not opened",
-                "errorCode": "1",
-                "nonce": nonce,
-            }),
-        },
+        // There is no association store: answering `success` here would only lure the
+        // extension into a channel that cannot protect credentials. Refuse honestly.
+        "test-associate" | "associate" => {
+            if session.allow_plaintext_logins && open_db.is_some() {
+                json!({
+                    "action": action,
+                    "id": open_db.map(|db| db.root.uuid.to_string()).unwrap_or_default(),
+                    "nonce": nonce,
+                    "success": "true",
+                })
+            } else {
+                no_encrypted_channel()
+            }
+        }
         "generate-password" => {
             let opts = PasswordGeneratorOptions::default();
             match opts.generate() {
@@ -154,6 +189,9 @@ pub fn handle_browser_message(req_val: &Value, open_db: Option<&Database>) -> Va
             }
         }
         "get-logins" => {
+            if !session.allow_plaintext_logins {
+                return no_encrypted_channel();
+            }
             let Some(db) = open_db else {
                 return json!({
                     "action": "get-logins",
@@ -231,7 +269,7 @@ pub fn generate_chromium_native_manifest(proxy_exe_path: &str) -> String {
             "chrome-extension://pdffhmdngciaglkoonimfcmckehcpafo/"
         ]
     });
-    serde_json::to_string_pretty(&manifest).unwrap_or_default()
+    serde_json::to_string_pretty(&manifest).expect("static manifest JSON serializes")
 }
 
 #[cfg(test)]
@@ -240,29 +278,58 @@ mod tests {
     use crate::model::Entry;
     use std::io::Cursor;
 
-    #[test]
-    fn native_messaging_frame_roundtrip_and_login_lookup() {
+    fn test_db() -> Database {
         let mut db = Database::new("BrowserVault");
         let mut e = Entry::new("GitHub");
         e.username = "octocat".to_string();
         e.password = "ghp_secret".into();
         e.url = "https://github.com/login".to_string();
         db.add_entry_at_path("Web/GitHub", e).expect("add");
+        db
+    }
 
-        let req = json!({
+    fn decode_frame(req: &Value) -> Value {
+        let mut wire = Vec::new();
+        write_native_message(&mut wire, req).expect("write frame");
+        let mut cursor = Cursor::new(wire);
+        read_native_message(&mut cursor)
+            .expect("read frame")
+            .expect("frame present")
+    }
+
+    #[test]
+    fn get_logins_refuses_plaintext_credentials_by_default() {
+        let db = test_db();
+        let decoded = decode_frame(&json!({
             "action": "get-logins",
             "url": "https://gist.github.com/octocat",
             "nonce": "n-123"
-        });
+        }));
+        let resp = handle_browser_message(&decoded, &BrowserSession::new(Some(&db)));
+        assert!(resp.get("error").is_some(), "must refuse: {resp}");
+        assert_eq!(resp["errorCode"], "15");
+        assert!(resp.get("entries").is_none(), "no credentials may leave");
+        // Same for association handshake.
+        let resp = handle_browser_message(
+            &json!({"action": "test-associate", "nonce": "n"}),
+            &BrowserSession::new(Some(&db)),
+        );
+        assert!(resp.get("error").is_some());
+    }
 
-        let mut wire = Vec::new();
-        write_native_message(&mut wire, &req).expect("write frame");
-        let mut cursor = Cursor::new(wire);
-        let decoded = read_native_message(&mut cursor)
-            .expect("read frame")
-            .expect("frame present");
-
-        let resp = handle_browser_message(&decoded, Some(&db));
+    #[test]
+    fn native_messaging_frame_roundtrip_and_login_lookup_in_explicit_test_mode() {
+        let db = test_db();
+        let decoded = decode_frame(&json!({
+            "action": "get-logins",
+            "url": "https://gist.github.com/octocat",
+            "nonce": "n-123"
+        }));
+        let session = BrowserSession {
+            db: Some(&db),
+            allow_plaintext_logins: true,
+        };
+        let resp = handle_browser_message(&decoded, &session);
         assert_eq!(resp["count"], 1);
         assert_eq!(resp["entries"][0]["login"], "octocat");
     }
