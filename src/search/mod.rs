@@ -194,10 +194,14 @@ impl SearchTerm {
             MatchMode::SubstringInsensitive => haystack
                 .to_lowercase()
                 .contains(&self.pattern.to_lowercase()),
-            MatchMode::Regex => self
-                .compiled_regex
-                .as_ref()
-                .is_some_and(|re| re.is_match(haystack)),
+            MatchMode::Regex => match self.compiled_regex.as_ref() {
+                Some(re) => re.is_match(haystack),
+                // Pattern failed to compile: fall back to a substring match rather
+                // than silently matching nothing (which reads as "0 results").
+                None => haystack
+                    .to_lowercase()
+                    .contains(&self.pattern.to_lowercase()),
+            },
         }
     }
 }
@@ -328,24 +332,73 @@ pub fn search_database<'a>(
     let query = SearchQuery::parse(query_str);
     let ctx = SearchContext::from_database(db);
     let mut results = Vec::new();
-    for (group_path, entry) in db.all_entries(include_recycle_bin) {
-        // Respect group `enable_searching = Some(false)` when non-trash
-        if !group_path.is_empty()
-            && let Ok(g) = db.resolve_group(&group_path)
-            && g.enable_searching == Some(false)
-        {
-            continue;
-        }
-        if query.matches(&group_path, entry, &ctx) {
-            let full_path = if group_path.is_empty() {
+    walk_searchable(
+        db,
+        &db.root,
+        "",
+        false,
+        false,
+        include_recycle_bin,
+        &query,
+        &ctx,
+        &mut results,
+    );
+    results
+}
+
+/// Single-pass searchable traversal.
+///
+/// Honors `enable_searching = Some(false)` inherited from parent groups (including on
+/// root-level entries), and only descends into the Recycle Bin when explicitly asked —
+/// an explicit trash search overrides the bin's own searching opt-out.
+#[allow(clippy::too_many_arguments)]
+fn walk_searchable<'a>(
+    db: &Database,
+    group: &'a crate::model::Group,
+    path: &str,
+    in_bin: bool,
+    opted_out: bool,
+    include_bin: bool,
+    query: &SearchQuery,
+    ctx: &SearchContext,
+    out: &mut Vec<(String, &'a Entry)>,
+) {
+    let is_bin = in_bin || group.uuid == db.meta.recycle_bin_uuid;
+    let opted_out = opted_out || group.enable_searching == Some(false);
+    if is_bin && !include_bin {
+        return;
+    }
+    if opted_out && !(is_bin && include_bin) {
+        return;
+    }
+    for entry in &group.entries {
+        if query.matches(path, entry, ctx) {
+            let full_path = if path.is_empty() {
                 format!("/{}", entry.title)
             } else {
-                format!("/{group_path}/{}", entry.title)
+                format!("/{path}/{}", entry.title)
             };
-            results.push((full_path, entry));
+            out.push((full_path, entry));
         }
     }
-    results
+    for child in &group.children {
+        let child_path = if path.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{path}/{}", child.name)
+        };
+        walk_searchable(
+            db,
+            child,
+            &child_path,
+            is_bin,
+            opted_out,
+            include_bin,
+            query,
+            ctx,
+            out,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -374,5 +427,53 @@ mod tests {
         assert_eq!(search_database(&db, "is:reused", false).len(), 2);
         assert_eq!(search_database(&db, "is:reused -g:Infra", false).len(), 1);
         assert_eq!(search_database(&db, "t:GitHub | t:Router", false).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod recycle_bin_and_optout_tests {
+    use super::*;
+    use crate::model::Entry;
+
+    #[test]
+    fn explicit_recycle_bin_search_overrides_the_bin_optout() {
+        let mut db = Database::new("V");
+        db.add_entry_at_path("Keep/Real", Entry::new("Real"))
+            .expect("add");
+        let trashed_uuid = {
+            db.add_entry_at_path("Keep/Trashed", Entry::new("Trashed"))
+                .expect("add")
+        };
+        db.delete_entry_by_uuid(trashed_uuid, false).expect("trash");
+        // The bin exists and opted out of searching…
+        assert!(!db.meta.recycle_bin_uuid.is_nil());
+        // …so default search excludes it…
+        assert_eq!(search_database(&db, "t:Trashed", false).len(), 0);
+        assert_eq!(search_database(&db, "t:Real", false).len(), 1);
+        // …but an explicit trash search must return it.
+        assert_eq!(search_database(&db, "t:Trashed", true).len(), 1);
+    }
+
+    #[test]
+    fn root_level_entries_honor_root_searching_optout() {
+        let mut db = Database::new("V");
+        let mut e = Entry::new("RootSecret");
+        e.username = "u".to_string();
+        db.root.entries.push(e);
+        db.root.enable_searching = Some(false);
+        assert_eq!(search_database(&db, "u:u", false).len(), 0);
+        db.root.enable_searching = Some(true);
+        assert_eq!(search_database(&db, "u:u", false).len(), 1);
+    }
+
+    #[test]
+    fn parent_group_optout_excludes_whole_subtree() {
+        let mut db = Database::new("V");
+        db.add_entry_at_path("Hidden/One", Entry::new("One"))
+            .expect("add");
+        if let Ok(g) = db.resolve_group_mut("Hidden") {
+            g.enable_searching = Some(false);
+        }
+        assert_eq!(search_database(&db, "t:One", false).len(), 0);
     }
 }

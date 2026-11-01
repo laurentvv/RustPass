@@ -143,10 +143,12 @@ impl OuterHeader {
                     v3_transform_seed = Some(seed);
                 }
                 FIELD_TRANSFORM_ROUNDS => {
-                    if val.len() == 8 {
-                        v3_transform_rounds =
-                            Some(u64::from_le_bytes(val.try_into().unwrap_or_default()));
-                    }
+                    let raw: [u8; 8] = <[u8; 8]>::try_from(val).map_err(|_| {
+                        RustPassError::CorruptedFormat(
+                            "TransformRounds must be 8 bytes".to_string(),
+                        )
+                    })?;
+                    v3_transform_rounds = Some(u64::from_le_bytes(raw));
                 }
                 FIELD_ENCRYPTION_IV => {
                     encryption_iv = Some(val.to_vec());
@@ -163,10 +165,12 @@ impl OuterHeader {
                     v3_stream_start = Some(ssb);
                 }
                 FIELD_INNER_RANDOM_STREAM_ID => {
-                    if val.len() == 4 {
-                        let id = u32::from_le_bytes(val.try_into().unwrap_or_default());
-                        v3_stream_algo = Some(InnerStreamAlgorithm::from_id(id)?);
-                    }
+                    let raw: [u8; 4] = <[u8; 4]>::try_from(val).map_err(|_| {
+                        RustPassError::CorruptedFormat(
+                            "InnerRandomStreamID must be 4 bytes".to_string(),
+                        )
+                    })?;
+                    v3_stream_algo = Some(InnerStreamAlgorithm::from_id(u32::from_le_bytes(raw))?);
                 }
                 FIELD_KDF_PARAMETERS => {
                     let vd = VariantDictionary::decode(val)?;
@@ -191,12 +195,28 @@ impl OuterHeader {
         let kdf = match kdf_params {
             Some(k) => k,
             None => {
+                if !matches!(version, KdbxVersion::V3_1) {
+                    return Err(RustPassError::CorruptedFormat(
+                        "KDBX 4 header is missing KdfParameters".to_string(),
+                    ));
+                }
                 let seed = v3_transform_seed.ok_or_else(|| {
                     RustPassError::CorruptedFormat(
                         "Missing TransformSeed in KDBX 3.1 header".to_string(),
                     )
                 })?;
-                let rounds = v3_transform_rounds.unwrap_or(60_000);
+                // Rounds come straight from the unauthenticated v3 header: bound
+                // them like the KDBX 4 KdfParameters to block hang/overflow abuse.
+                let rounds = v3_transform_rounds.ok_or_else(|| {
+                    RustPassError::CorruptedFormat(
+                        "Missing TransformRounds in KDBX 3.1 header".to_string(),
+                    )
+                })?;
+                if !(1..=crate::kdbx::variant_dict::AES_KDF_MAX_ROUNDS).contains(&rounds) {
+                    return Err(RustPassError::CorruptedFormat(format!(
+                        "TransformRounds outside the safe range in KDBX 3.1 header: {rounds}"
+                    )));
+                }
                 KdfConfig::AesKdf { rounds, seed }
             }
         };

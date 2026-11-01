@@ -189,6 +189,12 @@ pub enum CliCommand {
         /// Optional okon-cli path (compatibility flag).
         #[arg(long = "okon")]
         okon: Option<PathBuf>,
+        /// Write the full report (no passwords) to a CSV file.
+        #[arg(long = "export-csv")]
+        export_csv: Option<PathBuf>,
+        /// Write the full report (no passwords) to a styled HTML file.
+        #[arg(long = "export-html")]
+        export_html: Option<PathBuf>,
         /// Path to the `.kdbx` database.
         database: PathBuf,
     },

@@ -21,7 +21,7 @@ const SIMILAR_LOOKALIKES: &str = "Il1O0oB8S5Z2|";
 /// Configuration for the character-based CSPRNG password generator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasswordGeneratorOptions {
-    /// Target length in characters (`1..=512`, default `20`).
+    /// Target length in characters (`1..=4096`, default `20`).
     pub length: usize,
     /// Include `a-z`.
     pub lowercase: bool,
@@ -174,7 +174,7 @@ impl PasswordGeneratorOptions {
 /// Configuration for the Diceware passphrase generator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DicewareOptions {
-    /// Number of words (`1..=64`, default `6`).
+    /// Number of words (`1..=128`, default `6`).
     pub word_count: usize,
     /// Word separator string (default `" "` in CLI, `"-"` option in GUI).
     pub separator: String,

@@ -62,7 +62,7 @@ pub struct TotpConfig {
     pub secret_base32: ProtectedString,
     /// Underlying HMAC digest algorithm.
     pub algorithm: OtpAlgorithm,
-    /// Output code length (`6..=8` for numeric, `5` for Steam).
+    /// Output code length (`6..=10` for numeric, `5` for Steam).
     pub digits: u8,
     /// Time step in seconds (`30` default).
     pub period: u64,
@@ -108,7 +108,14 @@ impl TotpConfig {
             .split_once('/')
             .unwrap_or((kind_and_label, ""));
         let kind_lower = kind.to_ascii_lowercase();
-        if kind_lower != "totp" && kind_lower != "steam" && kind_lower != "hotp" {
+        if kind_lower == "hotp" {
+            // HOTP is counter-based: generating from the wall clock would produce
+            // valid-looking codes that never work. Refuse loudly instead.
+            return Err(RustPassError::UnsupportedFeature(
+                "HOTP (counter-based) otpauth URIs are not supported; use a TOTP URI".to_string(),
+            ));
+        }
+        if kind_lower != "totp" && kind_lower != "steam" {
             return Err(RustPassError::Totp(format!(
                 "Unsupported otpauth scheme type: {kind}"
             )));
@@ -431,5 +438,20 @@ mod tests {
         assert_eq!(code.len(), 5);
         assert!((1..=30).contains(&rem));
         assert!(code.chars().all(|c| STEAM_ALPHABET.contains(&(c as u8))));
+    }
+}
+
+#[cfg(test)]
+mod hotp_tests {
+    use super::*;
+
+    #[test]
+    fn hotp_uris_rejected_with_clear_error() {
+        let err = TotpConfig::parse("otpauth://hotp/alice?secret=JBSWY3DPEHPK3PXP&counter=1")
+            .expect_err("HOTP must be rejected");
+        assert!(
+            matches!(err, crate::error::RustPassError::UnsupportedFeature(ref m) if m.contains("HOTP")),
+            "unexpected error: {err:?}"
+        );
     }
 }

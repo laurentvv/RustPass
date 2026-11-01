@@ -101,22 +101,26 @@
 
 ### ⏱️ Two-Factor Authentication (TOTP & Steam Guard)
 - **RFC 6238 & RFC 4226:** HMAC-SHA1, HMAC-SHA256, and HMAC-SHA512 algorithms.
-- **Custom Parameters:** 6 to 10 digits, custom time steps (10s, 30s, 60s), and counter-based HOTP.
+- **Custom Parameters:** 6 to 10 digits and custom time steps (10s, 30s, 60s); counter-based HOTP URIs are rejected with an explicit error (not silently mistreated).
 - **Steam Guard:** Alphanumeric 5-character token generation.
-- **Integrated QR Code Generator:** Pure-Rust ISO/IEC 18004 QR encoder rendering scannable `otpauth://` matrices in the GUI.
+- **Integrated QR Code Generator:** Pure-Rust ISO/IEC 18004 QR encoder rendering scannable `otpauth://` matrices in the GUI (per-entry textures — no cross-tab leakage).
 
 ### 🛡️ Security Health Audit & Password Generation
-- **Automated Vault Audit:** Evaluates password strength, flags reused/duplicate passwords, identifies expired or near-expiry credentials, detects insecure HTTP URLs, and alerts on entries lacking 2FA.
+- **Automated Vault Audit:** Evaluates password strength, flags reused/duplicate passwords, identifies expired or near-expiry credentials, detects insecure HTTP URLs, and alerts on entries lacking 2FA — including offline HIBP breach checking.
+- **Exportable Reports:** One-click CSV and styled HTML audit reports from the GUI or `rustpass-cli analyze --export-csv/--export-html` (reports never contain passwords).
 - **Dual Password Generators:**
   - **CSPRNG Generator:** Cryptographically secure unbiased rejection sampling with custom character sets (upper, lower, digits, special, extended, exclude lookalike characters).
-  - **EFF Diceware Passphrases:** Wordlist-driven memorable passphrases with custom delimiters (`-`, `.`, `_`, space) and title casing.
+  - **EFF Diceware Passphrases:** The official **EFF large wordlist (7 776 words) is embedded** — strong passphrases out of the box, with custom delimiters (`-`, `.`, `_`, space) and title casing.
 
 ### 💻 Desktop Experience & Ergonomics
 - **Command Palette:** Instant quick navigation with `Ctrl+Shift+P` to switch groups, trigger audit, or generate credentials.
-- **Structured Search Grammar:** Filter with syntax like `u:alice is:totp -g:Archive | t:GitHub`.
-- **Auto-Type Integration:** Windows `SendInput` Unicode keystroke emulation (`Ctrl+V`).
-- **Timed Clipboard Clearing:** Configurable clipboard clearing timer (default 12s) with active countdown.
-- **Bilingual Interface:** English by default, with instant runtime switching to French (FR/EN).
+- **Structured Search Grammar:** Filter with syntax like `u:alice is:totp -g:Archive | t:GitHub` (with regex mode via `*pattern`).
+- **Recycle Bin Management:** Per-entry and bulk **Restore / Empty Trash** from the sidebar and inspector.
+- **Group Management:** Rename and delete groups (with tombstoned subtree semantics safe for merges) directly from the sidebar.
+- **Auto-Type Integration:** Windows `SendInput` Unicode keystroke emulation (`Ctrl+V`) with real `{CLEARFIELD}` support and strict placeholder validation.
+- **Timed Clipboard Clearing:** Configurable clipboard clearing timer (default 12s) with active countdown — a newer copy is never wiped.
+- **Idle Auto-Lock:** Unlocked vaults lock after configurable inactivity, saving unsaved edits first; every close path (tab ×, `Ctrl+N/W/Q`, menus) confirms before discarding unsaved changes.
+- **Bilingual Interface:** English by default, with instant runtime switching to French — toolbar, inspector, welcome/lock screens and all modals included.
 
 ---
 
@@ -219,11 +223,10 @@ rustpass-cli import -f csv backup.csv imported.kdbx
 
 `rustpass-proxy` is a native messaging host communicating over standard input/output using length-prefixed `u32 LE` JSON packets:
 
-1. **Manifest Installation:**
-   Register the manifest in Windows Registry or Linux/macOS Application Support:
-   - Key: `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.keepassxc.keepassxc_browser`
-2. **Browser Extension Compatibility:**
-   Integrates directly with standard browser password manager extensions on Chrome, Firefox, Brave, and Edge for auto-fill, credential lookup, and secure form filling.
+1. **Manifest Generation:**
+   `rustpass-proxy --print-chromium-manifest` prints a ready-to-register manifest (register it under `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.keepassxc.keepassxc_browser`).
+2. **Honest Security Boundary:**
+   The KeePassXC-Browser *encrypted* channel (NaCl box negotiated over `change-public-keys`) is not implemented, so the proxy **refuses to return credentials in plaintext** — `get-logins`, `associate`, and `test-associate` answer an explicit error instead of leaking vault passwords to any process that reaches the pipe. Non-secret actions (`ping`, `get-databasehash`, `generate-password`) work today; local integration tests can opt into plaintext responses with `RUSTPASS_ALLOW_PLAINTEXT_LOGINS=1` (loudly warned on stderr).
 
 ---
 

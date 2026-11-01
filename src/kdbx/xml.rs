@@ -18,6 +18,7 @@ use roxmltree::Node;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Seconds between `0001-01-01T00:00:00Z` (KDBX 4 binary epoch) and `1970-01-01T00:00:00Z`.
 const KDBX4_EPOCH_OFFSET_SECS: i64 = 62_135_596_800;
@@ -69,7 +70,8 @@ pub fn parse_keepass_xml(
                                 .children()
                                 .filter(|n| n.is_element() && n.has_tag_name("DeletedObject"))
                             {
-                                if let Some(del) = parse_deleted_object(del_node) {
+                                let del = parse_deleted_object(del_node)?;
+                                {
                                     deleted_objects.push(del);
                                 }
                             }
@@ -96,18 +98,18 @@ fn parse_meta(node: Node<'_, '_>, v3_binaries: &mut HashMap<usize, InnerBinary>)
         match child.tag_name().name() {
             "Generator" => meta.generator = text.to_string(),
             "DatabaseName" => meta.database_name = text.to_string(),
-            "DatabaseNameChanged" => meta.database_name_changed = parse_timestamp(text),
+            "DatabaseNameChanged" => meta.database_name_changed = parse_timestamp(text)?,
             "DatabaseDescription" => meta.database_description = text.to_string(),
             "DatabaseDescriptionChanged" => {
-                meta.database_description_changed = parse_timestamp(text);
+                meta.database_description_changed = parse_timestamp(text)?;
             }
             "DefaultUserName" => meta.default_username = text.to_string(),
-            "DefaultUserNameChanged" => meta.default_username_changed = parse_timestamp(text),
+            "DefaultUserNameChanged" => meta.default_username_changed = parse_timestamp(text)?,
             "MaintenanceHistoryDays" => {
                 meta.maintenance_history_days = text.parse().unwrap_or(365);
             }
             "Color" => meta.color = text.to_string(),
-            "MasterKeyChanged" => meta.master_key_changed = parse_timestamp(text),
+            "MasterKeyChanged" => meta.master_key_changed = parse_timestamp(text)?,
             "MemoryProtection" => {
                 for mp in child.children().filter(Node::is_element) {
                     let val = parse_bool(mp.text().unwrap_or("False"));
@@ -122,8 +124,8 @@ fn parse_meta(node: Node<'_, '_>, v3_binaries: &mut HashMap<usize, InnerBinary>)
                 }
             }
             "RecycleBinEnabled" => meta.recycle_bin_enabled = parse_bool(text),
-            "RecycleBinUUID" => meta.recycle_bin_uuid = parse_uuid(text),
-            "RecycleBinChanged" => meta.recycle_bin_changed = parse_timestamp(text),
+            "RecycleBinUUID" => meta.recycle_bin_uuid = parse_uuid(text)?,
+            "RecycleBinChanged" => meta.recycle_bin_changed = parse_timestamp(text)?,
             "HistoryMaxItems" => {
                 if let Ok(n) = text.parse::<isize>() {
                     meta.history_max_items = usize::try_from(n).unwrap_or(10);
@@ -210,11 +212,11 @@ fn parse_group(
     for child in node.children().filter(Node::is_element) {
         let text = child.text().unwrap_or("").trim();
         match child.tag_name().name() {
-            "UUID" => group.uuid = parse_uuid(text),
+            "UUID" => group.uuid = parse_uuid(text)?,
             "Name" => group.name = child.text().unwrap_or("").to_string(),
             "Notes" => group.notes = child.text().unwrap_or("").to_string(),
             "IconID" => group.icon_id = text.parse().unwrap_or(48),
-            "Times" => group.times = parse_times(child),
+            "Times" => group.times = parse_times(child)?,
             "IsExpanded" => group.is_expanded = parse_bool(text),
             "DefaultAutoTypeSequence" => {
                 group.default_autotype_sequence = child.text().unwrap_or("").to_string();
@@ -247,7 +249,7 @@ fn parse_entry(
     for child in node.children().filter(Node::is_element) {
         let text = child.text().unwrap_or("").trim();
         match child.tag_name().name() {
-            "UUID" => entry.uuid = parse_uuid(text),
+            "UUID" => entry.uuid = parse_uuid(text)?,
             "IconID" => entry.icon_id = text.parse().unwrap_or(0),
             "ForegroundColor" => entry.foreground_color = text.to_string(),
             "BackgroundColor" => entry.background_color = text.to_string(),
@@ -260,7 +262,7 @@ fn parse_entry(
                     .map(str::to_string)
                     .collect();
             }
-            "Times" => entry.times = parse_times(child),
+            "Times" => entry.times = parse_times(child)?,
             "String" => {
                 let key = child
                     .children()
@@ -360,22 +362,22 @@ fn parse_entry(
     Ok(entry)
 }
 
-fn parse_times(node: Node<'_, '_>) -> Times {
+fn parse_times(node: Node<'_, '_>) -> Result<Times> {
     let mut times = Times::default();
     for child in node.children().filter(Node::is_element) {
         let text = child.text().unwrap_or("").trim();
         match child.tag_name().name() {
-            "CreationTime" => times.creation_time = parse_timestamp(text),
-            "LastModificationTime" => times.last_modification_time = parse_timestamp(text),
-            "LastAccessTime" => times.last_access_time = parse_timestamp(text),
-            "ExpiryTime" => times.expiry_time = parse_timestamp(text),
+            "CreationTime" => times.creation_time = parse_timestamp(text)?,
+            "LastModificationTime" => times.last_modification_time = parse_timestamp(text)?,
+            "LastAccessTime" => times.last_access_time = parse_timestamp(text)?,
+            "ExpiryTime" => times.expiry_time = parse_timestamp(text)?,
             "Expires" => times.expires = parse_bool(text),
             "UsageCount" => times.usage_count = text.parse().unwrap_or(0),
-            "LocationChanged" => times.location_changed = parse_timestamp(text),
+            "LocationChanged" => times.location_changed = parse_timestamp(text)?,
             _ => {}
         }
     }
-    times
+    Ok(times)
 }
 
 fn parse_autotype(node: Node<'_, '_>) -> AutoType {
@@ -410,19 +412,20 @@ fn parse_autotype(node: Node<'_, '_>) -> AutoType {
     at
 }
 
-fn parse_deleted_object(node: Node<'_, '_>) -> Option<DeletedObject> {
+fn parse_deleted_object(node: Node<'_, '_>) -> Result<DeletedObject> {
     let uuid_str = node
         .children()
         .find(|n| n.has_tag_name("UUID"))
-        .and_then(|n| n.text())?;
+        .and_then(|n| n.text())
+        .ok_or_else(|| RustPassError::Xml("DeletedObject missing UUID".to_string()))?;
     let time_str = node
         .children()
         .find(|n| n.has_tag_name("DeletionTime"))
         .and_then(|n| n.text())
         .unwrap_or("");
-    Some(DeletedObject {
-        uuid: parse_uuid(uuid_str.trim()),
-        deletion_time: parse_timestamp(time_str.trim()),
+    Ok(DeletedObject {
+        uuid: parse_uuid(uuid_str.trim())?,
+        deletion_time: parse_timestamp(time_str.trim())?,
     })
 }
 
@@ -438,11 +441,14 @@ pub struct XmlSerializeMode {
 }
 
 /// Serializes `db` into UTF-8 `<KeePassFile>` XML and returns `(xml_string, deduplicated_binaries)`.
+///
+/// The XML string contains every vault secret in cleartext, so it is returned
+/// wrapped in [`Zeroizing`] and callers must keep it that way.
 pub fn serialize_keepass_xml(
     db: &Database,
     mode: XmlSerializeMode,
     inner_stream: &mut InnerStream,
-) -> Result<(String, Vec<InnerBinary>)> {
+) -> Result<(Zeroizing<String>, Vec<InnerBinary>)> {
     // 1. Collect and deduplicate binary attachments across all entries + history
     let mut binaries: Vec<InnerBinary> = Vec::new();
     let mut bin_index_map: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -486,7 +492,7 @@ pub fn serialize_keepass_xml(
     xml.push_str("\t</Root>\n");
     xml.push_str("</KeePassFile>\n");
 
-    Ok((xml, binaries))
+    Ok((Zeroizing::new(xml), binaries))
 }
 
 fn collect_binaries_from_group(
@@ -961,6 +967,11 @@ fn write_tag(xml: &mut String, depth: usize, tag: &str, value: &str) {
 }
 
 /// Escapes XML special characters (`&`, `<`, `>`, `"`, `'`).
+///
+/// Characters forbidden by XML 1.0 (C0 controls other than tab/LF/CR, and the
+/// `U+FFFE`/`U+FFFF` non-characters) are dropped: emitting them verbatim would
+/// produce a document that no XML parser (including this one and KeePassXC)
+/// can read back, silently bricking the vault on the next save.
 #[must_use]
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -971,6 +982,8 @@ pub fn escape_xml(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            '\u{FFFE}' | '\u{FFFF}' => {}
+            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
             c => out.push(c),
         }
     }
@@ -1001,28 +1014,35 @@ fn parse_opt_bool(s: &str) -> Option<bool> {
     }
 }
 
-fn parse_uuid(b64: &str) -> Uuid {
+fn parse_uuid(b64: &str) -> Result<Uuid> {
     let clean: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
-    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(clean.as_bytes())
-        && let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice())
-    {
-        return Uuid::from_bytes(arr);
+    if clean.is_empty() {
+        // An omitted UUID means "none" in KeePass semantics (e.g. `<RecycleBinUUID/>`).
+        return Ok(Uuid::nil());
     }
-    Uuid::new_v4()
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(clean.as_bytes())
+        .map_err(|e| RustPassError::Xml(format!("invalid UUID base64: {e}")))?;
+    let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+        RustPassError::Xml(format!("UUID must decode to 16 bytes, got {}", bytes.len()))
+    })?;
+    Ok(Uuid::from_bytes(arr))
 }
 
 fn encode_uuid(uuid: Uuid) -> String {
     base64::engine::general_purpose::STANDARD.encode(uuid.as_bytes())
 }
 
-fn parse_timestamp(s: &str) -> DateTime<Utc> {
+fn parse_timestamp(s: &str) -> Result<DateTime<Utc>> {
     if s.is_empty() {
-        return Utc::now();
+        // An omitted time is "unknown": deterministic epoch, never `Utc::now()`
+        // (which would churn the data on every open and could flip expiry).
+        return Ok(DateTime::from_timestamp(0, 0).unwrap_or_default());
     }
     if (s.contains('-') || s.contains(':'))
         && let Ok(dt) = DateTime::parse_from_rfc3339(s)
     {
-        return dt.with_timezone(&Utc);
+        return Ok(dt.with_timezone(&Utc));
     }
     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s.as_bytes())
         && let Ok(arr) = <[u8; 8]>::try_from(bytes.as_slice())
@@ -1030,10 +1050,12 @@ fn parse_timestamp(s: &str) -> DateTime<Utc> {
         let kdbx_secs = i64::from_le_bytes(arr);
         let unix_secs = kdbx_secs.saturating_sub(KDBX4_EPOCH_OFFSET_SECS);
         if let Some(dt) = Utc.timestamp_opt(unix_secs, 0).single() {
-            return dt;
+            return Ok(dt);
         }
     }
-    Utc::now()
+    Err(RustPassError::Xml(format!(
+        "unparseable KeePass timestamp: {s:?}"
+    )))
 }
 
 fn format_timestamp(dt: DateTime<Utc>, binary_kdbx4: bool) -> String {
@@ -1045,13 +1067,30 @@ fn format_timestamp(dt: DateTime<Utc>, binary_kdbx4: bool) -> String {
     }
 }
 
-/// Decompresses a GZip byte buffer.
+/// Safety cap on decompressed inner payloads (1 GiB).
+pub const MAX_DECOMPRESSED_BYTES: u64 = 1 << 30;
+
+/// Decompresses a GZip byte buffer, capped at [`MAX_DECOMPRESSED_BYTES`].
+///
+/// The payload comes from a (possibly shared or hostile) vault: without a cap,
+/// a tiny ciphertext can expand into an out-of-memory abort.
 pub fn gunzip_bytes(compressed: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = GzDecoder::new(compressed);
+    gunzip_bytes_capped(compressed, MAX_DECOMPRESSED_BYTES)
+}
+
+/// [`gunzip_bytes`] with an explicit cap, so the cap mechanism is testable cheaply.
+pub fn gunzip_bytes_capped(compressed: &[u8], max_bytes: u64) -> Result<Vec<u8>> {
+    let decoder = GzDecoder::new(compressed);
     let mut out = Vec::new();
     decoder
+        .take(max_bytes + 1)
         .read_to_end(&mut out)
         .map_err(|e| RustPassError::CorruptedFormat(format!("GZip decompression error: {e}")))?;
+    if out.len() as u64 > max_bytes {
+        return Err(RustPassError::CorruptedFormat(
+            "Decompressed payload exceeds the safety limit".to_string(),
+        ));
+    }
     Ok(out)
 }
 
@@ -1060,4 +1099,73 @@ pub fn gzip_bytes(raw: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(raw)?;
     Ok(encoder.finish()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+    use uuid::Uuid;
+
+    fn none_stream() -> InnerStream {
+        InnerStream::new(crate::model::InnerStreamAlgorithm::None, &[])
+    }
+
+    #[test]
+    fn escape_xml_drops_chars_forbidden_by_xml_1_0() {
+        assert_eq!(escape_xml("a\u{0001}b\u{0002}c"), "abc");
+        assert_eq!(escape_xml("x\u{FFFE}y\u{FFFF}z"), "xyz");
+        // Permitted whitespace survives.
+        assert_eq!(escape_xml("tab\tlf\nr\r"), "tab\tlf\nr\r");
+        assert_eq!(escape_xml("<&\"'>"), "&lt;&amp;&quot;&apos;&gt;");
+    }
+
+    #[test]
+    fn control_char_in_field_survives_full_kdbx_roundtrip_sanitized() {
+        use crate::crypto::kdf::MasterCredentials;
+        use crate::model::{Database, Entry, KdfConfig};
+
+        let mut db = Database::new("Sanitize Vault");
+        let mut entry = Entry::new("CtrlField");
+        entry.notes = "be\u{0001}ta".to_string();
+        db.add_entry_at_path("G/CtrlField", entry).expect("add");
+        db.kdf = KdfConfig::AesKdf {
+            rounds: 1_000,
+            seed: [9u8; 32],
+        };
+        let creds = MasterCredentials::with_password("pw");
+        let raw = db.to_kdbx_bytes(&creds).expect("encode");
+        let reopened = Database::from_kdbx_bytes(&raw, &creds).expect("decode");
+        assert_eq!(
+            reopened.resolve_entry("G/CtrlField").expect("entry").notes,
+            "beta"
+        );
+    }
+
+    #[test]
+    fn gzip_decompression_cap_rejects_oversized_payload() {
+        let big = vec![0u8; 8192];
+        let gz = gzip_bytes(&big).expect("gzip");
+        assert!(gunzip_bytes_capped(&gz, 4096).is_err());
+        assert_eq!(gunzip_bytes_capped(&gz, 16384).expect("gunzip").len(), 8192);
+    }
+
+    #[test]
+    fn malformed_uuid_and_timestamp_rejected() {
+        let bad_uuid = "<KeePassFile><Root><Group><UUID>!!!not-base64!!!</UUID><Name>g</Name></Group></Root></KeePassFile>";
+        assert!(parse_keepass_xml(bad_uuid, &mut none_stream(), &[]).is_err());
+        let bad_time = "<KeePassFile><Root><Group><UUID/><Name>g</Name><Times><CreationTime>garbage!!</CreationTime></Times></Group></Root></KeePassFile>";
+        assert!(parse_keepass_xml(bad_time, &mut none_stream(), &[]).is_err());
+    }
+
+    #[test]
+    fn empty_uuid_is_nil_and_empty_timestamp_is_epoch() {
+        let xml = "<KeePassFile><Root><Group><UUID/><Name>g</Name><Times><CreationTime/></Times></Group></Root></KeePassFile>";
+        let (_, root, _) = parse_keepass_xml(xml, &mut none_stream(), &[]).expect("parse");
+        assert_eq!(root.uuid, Uuid::nil());
+        assert_eq!(
+            root.times.creation_time,
+            DateTime::from_timestamp(0, 0).expect("epoch")
+        );
+    }
 }

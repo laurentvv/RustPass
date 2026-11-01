@@ -6,6 +6,7 @@ use crate::crypto::kdf::calibrate_argon2id;
 use crate::generator::{DicewareOptions, PasswordGeneratorOptions, estimate_password};
 use crate::health::{AuditReport, FindingKind};
 use crate::i18n::Language;
+use crate::i18n::Texts;
 use crate::model::{
     Argon2Variant, Attachment, CipherAlgorithm, CustomAttribute, Database, Entry, KdbxVersion,
     KdfConfig, ProtectedString,
@@ -123,6 +124,7 @@ impl EntryEditorModal {
         &mut self,
         ctx: &egui::Context,
         palette: &VaultPalette,
+        t: &'static Texts,
         gen_opts: &PasswordGeneratorOptions,
     ) -> Option<SavedEntryPayload> {
         if !self.open {
@@ -130,9 +132,9 @@ impl EntryEditorModal {
         }
 
         let win_title = if self.is_new {
-            "New Vault Entry"
+            t.ed_new_title
         } else {
-            "Edit Vault Entry"
+            t.ed_edit_title
         };
         let mut committed = None;
         let mut cancel_clicked = false;
@@ -144,23 +146,35 @@ impl EntryEditorModal {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.active_tab, EditorTab::General, "General");
-                    ui.selectable_value(&mut self.active_tab, EditorTab::Totp, "2FA / TOTP");
+                    ui.selectable_value(&mut self.active_tab, EditorTab::General, t.ed_tab_general);
+                    ui.selectable_value(&mut self.active_tab, EditorTab::Totp, t.ed_tab_totp);
                     ui.selectable_value(
                         &mut self.active_tab,
                         EditorTab::Attributes,
-                        format!("Attributes ({})", self.draft.custom_attributes.len()),
+                        format!(
+                            "{} ({})",
+                            t.ed_tab_attributes,
+                            self.draft.custom_attributes.len()
+                        ),
                     );
                     ui.selectable_value(
                         &mut self.active_tab,
                         EditorTab::Attachments,
-                        format!("Attachments ({})", self.draft.attachments.len()),
+                        format!(
+                            "{} ({})",
+                            t.ed_tab_attachments,
+                            self.draft.attachments.len()
+                        ),
                     );
-                    ui.selectable_value(&mut self.active_tab, EditorTab::AutoType, "Auto-Type");
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        EditorTab::AutoType,
+                        t.ed_tab_autotype,
+                    );
                     ui.selectable_value(
                         &mut self.active_tab,
                         EditorTab::History,
-                        format!("History ({})", self.draft.history.len()),
+                        format!("{} ({})", t.ed_tab_history, self.draft.history.len()),
                     );
                 });
                 ui.separator();
@@ -168,12 +182,12 @@ impl EntryEditorModal {
                 egui::ScrollArea::vertical()
                     .max_height(360.0)
                     .show(ui, |ui| match self.active_tab {
-                        EditorTab::General => self.ui_general(ui, palette, gen_opts),
-                        EditorTab::Totp => self.ui_totp(ctx, ui, palette),
-                        EditorTab::Attributes => self.ui_attributes(ui),
-                        EditorTab::Attachments => self.ui_attachments(ui),
-                        EditorTab::AutoType => self.ui_autotype(ui),
-                        EditorTab::History => self.ui_history(ui),
+                        EditorTab::General => self.ui_general(ui, palette, t, gen_opts),
+                        EditorTab::Totp => self.ui_totp(ctx, ui, palette, t),
+                        EditorTab::Attributes => self.ui_attributes(ui, t),
+                        EditorTab::Attachments => self.ui_attachments(ui, t),
+                        EditorTab::AutoType => self.ui_autotype(ui, t),
+                        EditorTab::History => self.ui_history(ui, t),
                     });
 
                 if let Some(ref err) = self.error_msg {
@@ -184,11 +198,15 @@ impl EntryEditorModal {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
-                        .button(RichText::new("Save Entry").strong().color(palette.accent))
+                        .button(
+                            RichText::new(t.ed_save_entry)
+                                .strong()
+                                .color(palette.accent),
+                        )
                         .clicked()
                     {
                         if self.draft.title.trim().is_empty() {
-                            self.error_msg = Some("Entry title cannot be empty.".to_string());
+                            self.error_msg = Some(t.ed_title_required.to_string());
                         } else {
                             let mut saved = self.draft.clone();
                             saved.title = saved.title.trim().to_string();
@@ -232,7 +250,7 @@ impl EntryEditorModal {
                             }
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t.cancel).clicked() {
                         cancel_clicked = true;
                     }
                 });
@@ -250,6 +268,7 @@ impl EntryEditorModal {
         &mut self,
         ui: &mut egui::Ui,
         palette: &VaultPalette,
+        t: &'static Texts,
         gen_opts: &PasswordGeneratorOptions,
     ) {
         egui::Grid::new("entry_general_grid")
@@ -257,15 +276,15 @@ impl EntryEditorModal {
             .spacing([12.0, 8.0])
             .striped(false)
             .show(ui, |ui| {
-                ui.label("Title *");
+                ui.label(t.lbl_title_req);
                 ui.add(egui::TextEdit::singleline(&mut self.draft.title).desired_width(410.0));
                 ui.end_row();
 
-                ui.label("Username");
+                ui.label(t.lbl_username);
                 ui.add(egui::TextEdit::singleline(&mut self.draft.username).desired_width(410.0));
                 ui.end_row();
 
-                ui.label("Password");
+                ui.label(t.lbl_password);
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.password_plain)
@@ -273,11 +292,15 @@ impl EntryEditorModal {
                             .font(egui::TextStyle::Monospace)
                             .desired_width(275.0),
                     );
-                    let eye = if self.show_password { "Hide" } else { "Show" };
+                    let eye = if self.show_password {
+                        t.btn_hide
+                    } else {
+                        t.btn_show
+                    };
                     if ui.button(eye).clicked() {
                         self.show_password = !self.show_password;
                     }
-                    if ui.button("Generate").clicked()
+                    if ui.button(t.btn_generate).clicked()
                         && let Ok(pw) = gen_opts.generate()
                     {
                         self.password_plain = pw.as_str().to_string();
@@ -285,7 +308,7 @@ impl EntryEditorModal {
                 });
                 ui.end_row();
 
-                ui.label("Entropy");
+                ui.label(t.lbl_entropy);
                 let est = estimate_password(&self.password_plain);
                 let col = strength_color(est.level, palette);
                 ui.horizontal(|ui| {
@@ -306,7 +329,7 @@ impl EntryEditorModal {
                 );
                 ui.end_row();
 
-                ui.label("Tags");
+                ui.label(t.lbl_tags);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.tags_csv)
                         .hint_text("infra, prod, ssh")
@@ -314,13 +337,13 @@ impl EntryEditorModal {
                 );
                 ui.end_row();
 
-                ui.label("Expires");
-                ui.checkbox(&mut self.draft.times.expires, "Enable expiration date");
+                ui.label(t.lbl_expires);
+                ui.checkbox(&mut self.draft.times.expires, t.ed_enable_expiry);
                 ui.end_row();
             });
 
         ui.add_space(8.0);
-        ui.label("Notes");
+        ui.label(t.lbl_notes);
         ui.add(
             egui::TextEdit::multiline(&mut self.draft.notes)
                 .desired_rows(5)
@@ -328,10 +351,14 @@ impl EntryEditorModal {
         );
     }
 
-    fn ui_totp(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, palette: &VaultPalette) {
-        ui.label(
-            "Enter a Base32 TOTP secret (e.g. JBSWY3DPEHPK3PXP) or full otpauth://totp/... URI:",
-        );
+    fn ui_totp(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        palette: &VaultPalette,
+        t: &'static Texts,
+    ) {
+        ui.label(t.ed_totp_hint);
         ui.add(
             egui::TextEdit::singleline(&mut self.otp_raw)
                 .font(egui::TextStyle::Monospace)
@@ -351,7 +378,7 @@ impl EntryEditorModal {
                     if let Ok((code, rem)) = cfg.generate_now() {
                         ctx.request_repaint_after(std::time::Duration::from_secs(1));
                         ui.horizontal(|ui| {
-                            ui.label("Live Code:");
+                            ui.label(t.ed_live_code);
                             ui.label(
                                 RichText::new(&code)
                                     .monospace()
@@ -368,7 +395,8 @@ impl EntryEditorModal {
                         .qr_cache
                         .as_ref()
                         .is_none_or(|(cached_uri, _)| cached_uri != &uri);
-                    if need_rebuild && let Ok(tex) = build_qr_texture(ctx, "editor_qr", &uri) {
+                    let tex_name = format!("editor_qr_{}", self.draft.uuid.simple());
+                    if need_rebuild && let Ok(tex) = build_qr_texture(ctx, &tex_name, &uri) {
                         self.qr_cache = Some((uri, tex));
                     }
                     if let Some((_, ref tex)) = self.qr_cache {
@@ -383,7 +411,7 @@ impl EntryEditorModal {
         }
     }
 
-    fn ui_attributes(&mut self, ui: &mut egui::Ui) {
+    fn ui_attributes(&mut self, ui: &mut egui::Ui, t: &'static Texts) {
         let mut remove_idx = None;
         for (i, attr) in self.draft.custom_attributes.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -399,8 +427,8 @@ impl EntryEditorModal {
                 {
                     attr.value = ProtectedString::new(val);
                 }
-                ui.checkbox(&mut attr.protected, "Protected");
-                if ui.button("Remove").clicked() {
+                ui.checkbox(&mut attr.protected, t.ed_protected);
+                if ui.button(t.btn_remove).clicked() {
                     remove_idx = Some(i);
                 }
             });
@@ -413,16 +441,16 @@ impl EntryEditorModal {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_attr_key)
-                    .hint_text("Attribute name")
+                    .hint_text(t.ed_attr_name_hint)
                     .desired_width(150.0),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_attr_val)
-                    .hint_text("Value")
+                    .hint_text(t.ed_attr_value_hint)
                     .desired_width(220.0),
             );
-            ui.checkbox(&mut self.new_attr_protected, "Protected");
-            if ui.button("+ Add").clicked() && !self.new_attr_key.trim().is_empty() {
+            ui.checkbox(&mut self.new_attr_protected, t.ed_protected);
+            if ui.button(t.btn_add).clicked() && !self.new_attr_key.trim().is_empty() {
                 self.draft.custom_attributes.push(CustomAttribute {
                     key: self.new_attr_key.trim().to_string(),
                     value: ProtectedString::new(self.new_attr_val.clone()),
@@ -434,8 +462,8 @@ impl EntryEditorModal {
         });
     }
 
-    fn ui_attachments(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Attach File from Disk…").clicked()
+    fn ui_attachments(&mut self, ui: &mut egui::Ui, t: &'static Texts) {
+        if ui.button(t.ed_attach_file).clicked()
             && let Some(path) = rfd::FileDialog::new().pick_file()
             && let Ok(data) = std::fs::read(&path)
         {
@@ -456,12 +484,13 @@ impl EntryEditorModal {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&att.name).strong());
                 ui.label(format!("({} bytes)", att.data.len()));
-                if ui.button("Export…").clicked()
+                if ui.button(t.btn_export).clicked()
                     && let Some(dest) = rfd::FileDialog::new().set_file_name(&att.name).save_file()
+                    && let Err(e) = std::fs::write(&dest, &att.data)
                 {
-                    let _ = std::fs::write(dest, &att.data);
+                    self.error_msg = Some(format!("Attachment export failed: {e}"));
                 }
-                if ui.button("Remove").clicked() {
+                if ui.button(t.btn_remove).clicked() {
                     rm = Some(idx);
                 }
             });
@@ -471,25 +500,22 @@ impl EntryEditorModal {
         }
     }
 
-    fn ui_autotype(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(
-            &mut self.draft.auto_type.enabled,
-            "Enable Auto-Type for this entry",
-        );
+    fn ui_autotype(&mut self, ui: &mut egui::Ui, t: &'static Texts) {
+        ui.checkbox(&mut self.draft.auto_type.enabled, t.ed_at_enable);
         ui.add_space(6.0);
-        ui.label("Keystroke Sequence (leave blank for default {USERNAME}{TAB}{PASSWORD}{ENTER}):");
+        ui.label(t.ed_at_seq_label);
         ui.add(
             egui::TextEdit::singleline(&mut self.draft.auto_type.default_sequence)
                 .font(egui::TextStyle::Monospace)
                 .desired_width(f32::INFINITY),
         );
         ui.add_space(6.0);
-        ui.weak("Supported placeholders: {USERNAME} {PASSWORD} {TOTP} {URL} {TITLE} {TAB} {ENTER} {DELAY=100} {S:Attr}");
+        ui.weak(t.ed_at_placeholders);
     }
 
-    fn ui_history(&mut self, ui: &mut egui::Ui) {
+    fn ui_history(&mut self, ui: &mut egui::Ui, t: &'static Texts) {
         if self.draft.history.is_empty() {
-            ui.weak("No historical revisions recorded yet.");
+            ui.weak(t.ed_no_history);
             return;
         }
         let mut restore_idx = None;
@@ -501,19 +527,33 @@ impl EntryEditorModal {
                         .format("%Y-%m-%d %H:%M:%S UTC")
                         .to_string(),
                 );
-                ui.label(format!("Title: {} | User: {}", snap.title, snap.username));
-                if ui.button("Restore Version").clicked() {
+                ui.label(crate::i18n::fill(
+                    t.ed_history_line,
+                    &[&snap.title, &snap.username],
+                ));
+                if ui.button(t.ed_restore).clicked() {
                     restore_idx = Some(i);
                 }
             });
         }
         if let Some(idx) = restore_idx {
-            let restored = self.draft.history[idx].clone();
-            self.draft.title = restored.title;
-            self.draft.username = restored.username;
-            self.password_plain = restored.password.as_str().to_string();
-            self.draft.url = restored.url;
-            self.draft.notes = restored.notes;
+            // Full rollback: the snapshot is a complete entry clone, so restore every
+            // field (tags, OTP seed, custom attributes, attachments, auto-type) — a
+            // partial restore would silently keep the current values.
+            let snap = self.draft.history[idx].clone();
+            let keep_uuid = self.draft.uuid;
+            let keep_history = std::mem::take(&mut self.draft.history);
+            self.draft = snap;
+            self.draft.uuid = keep_uuid; // identity must stay stable
+            self.draft.history = keep_history;
+            self.draft.times.touch_modified();
+            self.password_plain = self.draft.password.as_str().to_string();
+            self.otp_raw = self
+                .draft
+                .otp
+                .as_ref()
+                .map_or_else(String::new, |o| o.as_str().to_string());
+            self.tags_csv = self.draft.tags.join(", ");
         }
     }
 }
@@ -585,14 +625,19 @@ impl GeneratorModal {
     }
 
     /// Renders the Generator window and returns `Some(secret_to_copy)` if the user clicks Copy.
-    pub fn ui(&mut self, ctx: &egui::Context, palette: &VaultPalette) -> Option<String> {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        palette: &VaultPalette,
+        t: &'static Texts,
+    ) -> Option<String> {
         if !self.open {
             return None;
         }
         let mut copy_requested = None;
         let mut open = self.open;
 
-        egui::Window::new("Password & Passphrase Generator")
+        egui::Window::new(t.gen_title)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -600,13 +645,13 @@ impl GeneratorModal {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .selectable_value(&mut self.diceware_mode, false, "Character CSPRNG")
+                        .selectable_value(&mut self.diceware_mode, false, t.gen_mode_chars)
                         .clicked()
                     {
                         self.regenerate();
                     }
                     if ui
-                        .selectable_value(&mut self.diceware_mode, true, "Diceware Passphrase")
+                        .selectable_value(&mut self.diceware_mode, true, t.gen_mode_diceware)
                         .clicked()
                     {
                         self.regenerate();
@@ -641,10 +686,13 @@ impl GeneratorModal {
                 if self.diceware_mode {
                     let mut changed = false;
                     changed |= ui
-                        .add(egui::Slider::new(&mut self.dw_opts.word_count, 3..=12).text("Words"))
+                        .add(
+                            egui::Slider::new(&mut self.dw_opts.word_count, 3..=12)
+                                .text(t.gen_words),
+                        )
                         .changed();
                     ui.horizontal(|ui| {
-                        ui.label("Separator:");
+                        ui.label(t.gen_separator);
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.dw_opts.separator)
@@ -652,10 +700,10 @@ impl GeneratorModal {
                             )
                             .changed();
                         changed |= ui
-                            .checkbox(&mut self.dw_opts.capitalize, "Capitalize")
+                            .checkbox(&mut self.dw_opts.capitalize, t.gen_capitalize)
                             .changed();
                         changed |= ui
-                            .checkbox(&mut self.dw_opts.include_number, "Include digits")
+                            .checkbox(&mut self.dw_opts.include_number, t.gen_include_digits)
                             .changed();
                     });
                     if changed {
@@ -664,7 +712,10 @@ impl GeneratorModal {
                 } else {
                     let mut changed = false;
                     changed |= ui
-                        .add(egui::Slider::new(&mut self.pw_opts.length, 6..=64).text("Characters"))
+                        .add(
+                            egui::Slider::new(&mut self.pw_opts.length, 6..=64)
+                                .text(t.gen_characters),
+                        )
                         .changed();
                     ui.horizontal_wrapped(|ui| {
                         changed |= ui.checkbox(&mut self.pw_opts.lowercase, "a-z").changed();
@@ -672,10 +723,10 @@ impl GeneratorModal {
                         changed |= ui.checkbox(&mut self.pw_opts.numbers, "0-9").changed();
                         changed |= ui.checkbox(&mut self.pw_opts.special, "!@#$%").changed();
                         changed |= ui
-                            .checkbox(&mut self.pw_opts.exclude_similar, "No look-alikes")
+                            .checkbox(&mut self.pw_opts.exclude_similar, t.gen_no_lookalikes)
                             .changed();
                         changed |= ui
-                            .checkbox(&mut self.pw_opts.ensure_every_group, "Every class")
+                            .checkbox(&mut self.pw_opts.ensure_every_group, t.gen_every_class)
                             .changed();
                     });
                     if changed {
@@ -685,15 +736,11 @@ impl GeneratorModal {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Regenerate").clicked() {
+                    if ui.button(t.gen_regenerate).clicked() {
                         self.regenerate();
                     }
                     if ui
-                        .button(
-                            RichText::new("Copy to Clipboard")
-                                .strong()
-                                .color(palette.accent),
-                        )
+                        .button(RichText::new(t.gen_copy).strong().color(palette.accent))
                         .clicked()
                     {
                         copy_requested = Some(self.current_output.clone());
@@ -711,6 +758,8 @@ impl GeneratorModal {
 pub struct SecurityAuditModal {
     pub open: bool,
     pub report: Option<AuditReport>,
+    /// Last export outcome shown in the modal (no secrets involved).
+    pub export_status: Option<String>,
 }
 
 impl SecurityAuditModal {
@@ -726,15 +775,16 @@ impl SecurityAuditModal {
         }
         let mut open = self.open;
         let mut jump_uuid = None;
+        let t = crate::i18n::texts(lang);
 
-        egui::Window::new("Vault Security Health Audit")
+        egui::Window::new(t.audit_title)
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size([620.0, 440.0])
             .show(ctx, |ui| {
                 let Some(ref rep) = self.report else {
-                    ui.label("No active vault to analyze.");
+                    ui.label(t.audit_none);
                     return;
                 };
 
@@ -754,27 +804,55 @@ impl SecurityAuditModal {
                             .color(score_col),
                     );
                     ui.vertical(|ui| {
-                        ui.label(format!(
-                            "Scanned {} active entries · Average entropy: {:.1} bits",
-                            rep.total_entries, rep.average_entropy_bits
+                        let avg_bits = format!("{:.1}", rep.average_entropy_bits);
+                        ui.label(crate::i18n::fill(
+                            t.audit_summary,
+                            &[&rep.total_entries, &avg_bits],
                         ));
-                        ui.label(format!(
-                            "Weak: {}  ·  Reused: {}  ·  Expired: {}  ·  HTTP: {}  ·  2FA Enabled: {}",
-                            rep.weak_count,
-                            rep.reused_count,
-                            rep.expired_count,
-                            rep.http_count,
-                            rep.totp_enabled_count
+                        ui.label(crate::i18n::fill(
+                            t.audit_counts,
+                            &[
+                                &rep.weak_count,
+                                &rep.reused_count,
+                                &rep.expired_count,
+                                &rep.http_count,
+                                &rep.totp_enabled_count,
+                            ],
                         ));
                     });
                 });
+                ui.horizontal(|ui| {
+                    if ui.button(t.audit_export_csv).clicked()
+                        && let Some(dest) = rfd::FileDialog::new()
+                            .set_file_name("rustpass-audit.csv")
+                            .save_file()
+                    {
+                        self.export_status =
+                            match std::fs::write(&dest, crate::health::export_audit_csv(rep)) {
+                                Ok(()) => Some(format!("Wrote {}", dest.display())),
+                                Err(e) => Some(format!("Export failed: {e}")),
+                            };
+                    }
+                    if ui.button(t.audit_export_html).clicked()
+                        && let Some(dest) = rfd::FileDialog::new()
+                            .set_file_name("rustpass-audit.html")
+                            .save_file()
+                    {
+                        self.export_status =
+                            match std::fs::write(&dest, crate::health::export_audit_html(rep)) {
+                                Ok(()) => Some(format!("Wrote {}", dest.display())),
+                                Err(e) => Some(format!("Export failed: {e}")),
+                            };
+                    }
+                });
+                if let Some(ref status) = self.export_status {
+                    ui.weak(status);
+                }
+
                 ui.separator();
 
                 if rep.findings.is_empty() {
-                    ui.colored_label(
-                        palette.success,
-                        "Zero security issues detected across active entries!",
-                    );
+                    ui.colored_label(palette.success, t.audit_clean);
                 } else {
                     egui::ScrollArea::vertical()
                         .max_height(320.0)
@@ -864,14 +942,20 @@ impl DbSettingsModal {
     }
 
     /// Renders the Database Settings window and returns `true` when applied onto `db`.
-    pub fn ui(&mut self, ctx: &egui::Context, db: &mut Database, palette: &VaultPalette) -> bool {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        db: &mut Database,
+        palette: &VaultPalette,
+        t: &'static Texts,
+    ) -> bool {
         if !self.open {
             return false;
         }
         let mut applied = false;
         let mut open = self.open;
 
-        egui::Window::new("Database Security & KDF Settings")
+        egui::Window::new(t.dbs_title)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -881,26 +965,26 @@ impl DbSettingsModal {
                     .num_columns(2)
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Vault Name");
+                        ui.label(t.dbs_vault_name);
                         ui.text_edit_singleline(&mut self.db_name);
                         ui.end_row();
 
-                        ui.label("Description");
+                        ui.label(t.dbs_description);
                         ui.text_edit_singleline(&mut self.db_description);
                         ui.end_row();
 
-                        ui.label("Default Username");
+                        ui.label(t.dbs_default_username);
                         ui.text_edit_singleline(&mut self.default_username);
                         ui.end_row();
 
-                        ui.label("Container Format");
+                        ui.label(t.dbs_format);
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.is_kdbx4, true, "KDBX 4.0 (Recommended)");
-                            ui.selectable_value(&mut self.is_kdbx4, false, "KDBX 3.1 (Legacy)");
+                            ui.selectable_value(&mut self.is_kdbx4, true, t.dbs_kdbx4);
+                            ui.selectable_value(&mut self.is_kdbx4, false, t.dbs_kdbx3);
                         });
                         ui.end_row();
 
-                        ui.label("Outer Cipher");
+                        ui.label(t.dbs_cipher);
                         ui.horizontal(|ui| {
                             ui.selectable_value(
                                 &mut self.cipher,
@@ -916,24 +1000,24 @@ impl DbSettingsModal {
                         ui.end_row();
 
                         if self.is_kdbx4 {
-                            ui.label("Argon2id Memory (MiB)");
+                            ui.label(t.dbs_argon2_memory);
                             ui.add(egui::Slider::new(&mut self.argon2_mib, 16..=512));
                             ui.end_row();
 
-                            ui.label("Argon2id Iterations");
+                            ui.label(t.dbs_argon2_iter);
                             ui.add(egui::Slider::new(&mut self.argon2_iterations, 1..=32));
                             ui.end_row();
 
-                            ui.label("Argon2id Lanes");
+                            ui.label(t.dbs_argon2_lanes);
                             ui.add(egui::Slider::new(&mut self.argon2_lanes, 1..=16));
                             ui.end_row();
                         }
                     });
 
                 ui.add_space(6.0);
-                ui.checkbox(&mut self.recycle_bin_enabled, "Enable Recycle Bin");
+                ui.checkbox(&mut self.recycle_bin_enabled, t.dbs_recycle_bin);
                 if self.is_kdbx4
-                    && ui.button("Benchmark 500 ms Argon2id Target").clicked()
+                    && ui.button(t.dbs_benchmark).clicked()
                     && let Ok(KdfConfig::Argon2 {
                         memory_bytes,
                         iterations,
@@ -948,11 +1032,7 @@ impl DbSettingsModal {
 
                 ui.separator();
                 if ui
-                    .button(
-                        RichText::new("Apply Settings")
-                            .strong()
-                            .color(palette.accent),
-                    )
+                    .button(RichText::new(t.dbs_apply).strong().color(palette.accent))
                     .clicked()
                 {
                     db.meta.database_name.clone_from(&self.db_name);

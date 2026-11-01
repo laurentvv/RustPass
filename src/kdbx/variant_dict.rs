@@ -16,6 +16,17 @@ const TYPE_INT64: u8 = 0x0D;
 const TYPE_STRING: u8 = 0x18;
 const TYPE_BYTEARRAY: u8 = 0x42;
 
+/// Upper bound accepted for the unauthenticated Argon2 lane count (`P`).
+pub const ARGON2_MAX_PARALLELISM: u64 = 64;
+/// Lower bound accepted for the unauthenticated Argon2 memory cost (`M`), in bytes.
+pub const ARGON2_MIN_MEMORY_BYTES: u64 = 8 * 1024;
+/// Upper bound accepted for the unauthenticated Argon2 memory cost (`M`), in bytes (2 GiB).
+pub const ARGON2_MAX_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Upper bound accepted for the unauthenticated Argon2 iteration count (`I`).
+pub const ARGON2_MAX_ITERATIONS: u64 = 10_000_000;
+/// Upper bound accepted for the unauthenticated AES-KDF round count (`R`).
+pub const AES_KDF_MAX_ROUNDS: u64 = 100_000_000;
+
 /// Typed value inside a KDBX 4 `VariantDictionary`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariantValue {
@@ -205,10 +216,29 @@ impl VariantDictionary {
                     salt_slice.len()
                 ))
             })?;
-            let parallelism = self.get_u64("P").unwrap_or(2) as u32;
+            // KDF parameters are read from the unauthenticated outer header, so they
+            // are attacker-controlled: bound them before any allocation or loop runs
+            // (a hostile multi-TiB `M` or near-u64::MAX `I`/`R` would otherwise abort
+            // or hang the process before the header HMAC is even checked).
+            let parallelism = self.get_u64("P").unwrap_or(2);
             let memory_bytes = self.get_u64("M").unwrap_or(64 * 1024 * 1024);
             let iterations = self.get_u64("I").unwrap_or(2);
-            let version = self.get_u64("V").unwrap_or(0x13) as u32;
+            let version = self.get_u64("V").unwrap_or(0x13);
+            if !(1..=ARGON2_MAX_PARALLELISM).contains(&parallelism)
+                || !(ARGON2_MIN_MEMORY_BYTES..=ARGON2_MAX_MEMORY_BYTES).contains(&memory_bytes)
+                || !(1..=ARGON2_MAX_ITERATIONS).contains(&iterations)
+                || !matches!(version, 0x10 | 0x13)
+            {
+                return Err(RustPassError::CorruptedFormat(format!(
+                    "Argon2 KDF parameters outside the safe range (P={parallelism}, M={memory_bytes}, I={iterations}, V=0x{version:x})"
+                )));
+            }
+            let parallelism = u32::try_from(parallelism).map_err(|_| {
+                RustPassError::CorruptedFormat("Argon2 parallelism exceeds u32".to_string())
+            })?;
+            let version = u32::try_from(version).map_err(|_| {
+                RustPassError::CorruptedFormat("Argon2 version exceeds u32".to_string())
+            })?;
             Ok(KdfConfig::Argon2 {
                 variant,
                 memory_bytes,
@@ -219,6 +249,11 @@ impl VariantDictionary {
             })
         } else if uuid == KdfConfig::AES_KDF_UUID {
             let rounds = self.get_u64("R").unwrap_or(600_000);
+            if !(1..=AES_KDF_MAX_ROUNDS).contains(&rounds) {
+                return Err(RustPassError::CorruptedFormat(format!(
+                    "AES-KDF rounds outside the safe range: {rounds}"
+                )));
+            }
             let seed_slice = self.get_bytes("S").ok_or_else(|| {
                 RustPassError::CorruptedFormat("AES-KDF missing seed 'S'".to_string())
             })?;
@@ -270,5 +305,61 @@ impl VariantDictionary {
             }
         }
         Self { entries }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argon2_dict(p: u64, m: u64, i: u64, v: u64) -> VariantDictionary {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "$UUID".to_string(),
+            VariantValue::ByteArray(Argon2Variant::Argon2id.uuid_bytes().to_vec()),
+        );
+        entries.insert("S".to_string(), VariantValue::ByteArray([1u8; 32].to_vec()));
+        entries.insert("P".to_string(), VariantValue::UInt64(p));
+        entries.insert("M".to_string(), VariantValue::UInt64(m));
+        entries.insert("I".to_string(), VariantValue::UInt64(i));
+        entries.insert("V".to_string(), VariantValue::UInt64(v));
+        VariantDictionary { entries }
+    }
+
+    fn aes_dict(rounds: u64) -> VariantDictionary {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "$UUID".to_string(),
+            VariantValue::ByteArray(KdfConfig::AES_KDF_UUID.to_vec()),
+        );
+        entries.insert("S".to_string(), VariantValue::ByteArray([2u8; 32].to_vec()));
+        entries.insert("R".to_string(), VariantValue::UInt64(rounds));
+        VariantDictionary { entries }
+    }
+
+    #[test]
+    fn hostile_argon2_parameters_rejected_at_the_trust_boundary() {
+        // KDF params live in the unauthenticated header: out-of-range values
+        // must be rejected before any Argon2 allocation runs.
+        assert!(argon2_dict(65, 64 << 20, 3, 0x13).to_kdf_config().is_err()); // P too large
+        assert!(argon2_dict(0, 64 << 20, 3, 0x13).to_kdf_config().is_err()); // P zero
+        assert!(argon2_dict(4, 3 << 30, 3, 0x13).to_kdf_config().is_err()); // M too large (3 GiB)
+        assert!(argon2_dict(4, 4096, 3, 0x13).to_kdf_config().is_err()); // M too small
+        assert!(
+            argon2_dict(4, 64 << 20, 10_000_001, 0x13)
+                .to_kdf_config()
+                .is_err()
+        ); // I too large
+        assert!(argon2_dict(4, 64 << 20, 3, 0x11).to_kdf_config().is_err()); // unknown version
+        assert!(argon2_dict(4, 64 << 20, 3, 0x10).to_kdf_config().is_ok());
+        assert!(argon2_dict(4, 64 << 20, 3, 0x13).to_kdf_config().is_ok());
+    }
+
+    #[test]
+    fn hostile_aes_kdf_rounds_rejected() {
+        assert!(aes_dict(0).to_kdf_config().is_err());
+        assert!(aes_dict(AES_KDF_MAX_ROUNDS + 1).to_kdf_config().is_err());
+        assert!(aes_dict(u64::MAX).to_kdf_config().is_err());
+        assert!(aes_dict(600_000).to_kdf_config().is_ok());
     }
 }

@@ -103,19 +103,30 @@ impl AppSettings {
         dirs::config_dir().map(|d| d.join("RustPass").join("settings.json"))
     }
 
-    /// Loads `AppSettings` from disk or returns `Self::default()` if absent/corrupt.
+    /// Loads `AppSettings` from disk. A corrupt file resets to defaults **with a
+    /// stderr warning** (never silent), a missing file is the normal first run.
     #[must_use]
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else {
             return Self::default();
         };
-        let Ok(raw) = std::fs::read_to_string(path) else {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        serde_json::from_str(&raw).unwrap_or_default()
+        match serde_json::from_str(&raw) {
+            Ok(settings) => settings,
+            Err(e) => {
+                eprintln!(
+                    "warning: {} is corrupt ({e}); resetting preferences to defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
     }
 
-    /// Saves `AppSettings` to disk (best-effort).
+    /// Saves `AppSettings` atomically (sibling `.tmp` + rename) so a crash mid-write
+    /// can never destroy the previous preferences.
     pub fn save(&self) {
         let Some(path) = Self::config_path() else {
             return;
@@ -124,7 +135,10 @@ impl AppSettings {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 

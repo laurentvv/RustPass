@@ -19,6 +19,20 @@ use std::process::ExitCode;
 use zeroize::Zeroizing;
 
 fn main() -> ExitCode {
+    // The deeply nested `clap` derive over this large command set plus unoptimized
+    // debug frames overflow the default 1 MiB Windows main-thread stack; run the
+    // whole CLI on a comfortably sized thread (release builds are unaffected).
+    let worker = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(cli_main)
+        .expect("spawn rustpass-cli worker thread");
+    match worker.join() {
+        Ok(code) => code,
+        Err(_) => ExitCode::FAILURE,
+    }
+}
+
+fn cli_main() -> ExitCode {
     let args = CliRoot::parse();
     match run(args.command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -58,7 +72,11 @@ impl PromptReader {
             let mut line = Zeroizing::new(String::new());
             let n = self.reader.read_line(&mut line)?;
             if n == 0 && line.is_empty() {
-                return Ok(Zeroizing::new(String::new()));
+                // A closed stdin must not silently become an empty master password.
+                return Err(RustPassError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF while reading password from stdin",
+                )));
             }
             while line.ends_with('\n') || line.ends_with('\r') {
                 line.pop();
@@ -116,7 +134,8 @@ impl PromptReader {
         };
 
         let creds = MasterCredentials::new(pw_opt, open.key_file.as_deref())?;
-        let db = Database::open(db_path, &creds)?;
+        let db = Database::open(db_path, &creds)
+            .map_err(|e| e.with_context(format!("opening {}", db_path.display())))?;
         Ok((db, creds))
     }
 }
@@ -159,7 +178,15 @@ fn run(command: CliCommand) -> Result<()> {
             password,
         } => {
             let pw_buf = match password {
-                Some(p) => Zeroizing::new(p),
+                Some(p) => {
+                    if !quiet {
+                        eprintln!(
+                            "Warning: password passed on the command line is stored in shell \
+                             history; prefer letting the tool prompt."
+                        );
+                    }
+                    Zeroizing::new(p)
+                }
                 None => prompts.read_secret("Enter password to estimate: ", quiet)?,
             };
             let est = estimate_password(&pw_buf);
@@ -204,6 +231,7 @@ fn run(command: CliCommand) -> Result<()> {
                 None
             };
 
+            validate_decryption_time(decryption_time)?;
             let stem = database
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -526,10 +554,28 @@ fn run(command: CliCommand) -> Result<()> {
             open,
             hibp,
             okon: _,
+            export_csv,
+            export_html,
             database,
         } => {
             let (db, _) = prompts.unlock_vault(&open, &database)?;
             let report = analyze_database(&db, hibp.as_deref())?;
+            if let Some(path) = export_csv {
+                std::fs::write(&path, rustpass::health::export_audit_csv(&report)).map_err(
+                    |e| RustPassError::from(e).with_context(format!("writing {}", path.display())),
+                )?;
+                if !open.quiet {
+                    eprintln!("Wrote audit CSV to {}", path.display());
+                }
+            }
+            if let Some(path) = export_html {
+                std::fs::write(&path, rustpass::health::export_audit_html(&report)).map_err(
+                    |e| RustPassError::from(e).with_context(format!("writing {}", path.display())),
+                )?;
+                if !open.quiet {
+                    eprintln!("Wrote audit HTML to {}", path.display());
+                }
+            }
             println!(
                 "Vault Security Score: {}/100 ({} entries, avg {:.1} bits)",
                 report.health_score, report.total_entries, report.average_entropy_bits
@@ -589,7 +635,10 @@ fn run(command: CliCommand) -> Result<()> {
                 None
             };
 
-            let raw = std::fs::read_to_string(&xml)?;
+            validate_decryption_time(decryption_time)?;
+            let raw = std::fs::read_to_string(&xml).map_err(|e| {
+                RustPassError::from(e).with_context(format!("reading {}", xml.display()))
+            })?;
             let is_csv = xml
                 .extension()
                 .and_then(|e| e.to_str())
@@ -627,7 +676,8 @@ fn run(command: CliCommand) -> Result<()> {
             }
             let (mut dst_db, dst_creds) = prompts.unlock_vault(&open, &database)?;
             let src_db = if same_credentials {
-                Database::open(&database2, &dst_creds)?
+                Database::open(&database2, &dst_creds)
+                    .map_err(|e| e.with_context(format!("opening {}", database2.display())))?
             } else {
                 let src_open = VaultOpenArgs {
                     quiet: open.quiet,
@@ -664,7 +714,9 @@ fn run(command: CliCommand) -> Result<()> {
             import_file,
         } => {
             let (mut db, creds) = prompts.unlock_vault(&open, &database)?;
-            let data = std::fs::read(&import_file)?;
+            let data = std::fs::read(&import_file).map_err(|e| {
+                RustPassError::from(e).with_context(format!("reading {}", import_file.display()))
+            })?;
             let target = db.resolve_entry_mut(&entry)?;
             if let Some(existing) = target
                 .attachments
@@ -795,10 +847,10 @@ fn run(command: CliCommand) -> Result<()> {
             };
 
             let mut clipboard = arboard::Clipboard::new()
-                .map_err(|e| RustPassError::UnsupportedFeature(format!("Clipboard error: {e}")))?;
+                .map_err(|e| RustPassError::Clipboard(format!("open clipboard: {e}")))?;
             clipboard
                 .set_text(secret.as_str())
-                .map_err(|e| RustPassError::UnsupportedFeature(format!("Clipboard write: {e}")))?;
+                .map_err(|e| RustPassError::Clipboard(format!("write clipboard: {e}")))?;
 
             let secs = timeout.unwrap_or(0);
             if secs > 0 {
@@ -822,13 +874,18 @@ fn run(command: CliCommand) -> Result<()> {
             } else {
                 &db.meta.database_name
             };
-            let stdin = std::io::stdin();
-            for line_res in stdin.lock().lines() {
+            // Read the REPL through the same BufReader used for the unlock prompt:
+            // a fresh stdin handle would miss commands already buffered by the
+            // unlock read (`printf 'pw\nls\n' | rustpass-cli open db.kdbx`).
+            loop {
                 if !open.quiet {
                     eprint!("{name}> ");
                     let _ = std::io::stderr().flush();
                 }
-                let line = line_res?;
+                let mut line = String::new();
+                if prompts.reader.read_line(&mut line)? == 0 {
+                    break;
+                }
                 let cmd = line.trim();
                 if cmd.is_empty() {
                     continue;
@@ -890,4 +947,16 @@ fn print_group_ls(group: &Group, prefix: &str, depth: usize, recursive: bool, fl
             println!("{indent}{}", entry.title);
         }
     }
+}
+
+/// Validates the `--decryption-time` flag (100..=5000 ms, as documented in help).
+fn validate_decryption_time(ms: Option<u64>) -> Result<()> {
+    if let Some(ms) = ms
+        && !(100..=5000).contains(&ms)
+    {
+        return Err(RustPassError::InvalidArgument(
+            "--decryption-time must be within 100..=5000 ms".to_string(),
+        ));
+    }
+    Ok(())
 }
