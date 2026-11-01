@@ -1,5 +1,6 @@
 /target/
 /.scratch/
+/scratch/
 *.kdbx
 *.keyx
 *.tmp
