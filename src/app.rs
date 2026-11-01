@@ -220,6 +220,14 @@ impl RustPassApp {
             }
         }
 
+        if let Some(ref l) = cli_args.lang {
+            match l.to_lowercase().as_str() {
+                "en" | "english" => app.settings.language = Language::English,
+                "fr" | "french" | "francais" => app.settings.language = Language::French,
+                _ => {}
+            }
+        }
+
         if cli_args.showcase {
             app.open_showcase_demo_vault();
             if let Some(sess) = app.sessions.first_mut() {
@@ -286,6 +294,14 @@ impl RustPassApp {
         if let Some(db_path) = cli_args.database {
             app.welcome_db_path = db_path.display().to_string();
         }
+        if let Some(ref l) = cli_args.lang {
+            match l.to_lowercase().as_str() {
+                "en" | "english" => app.settings.language = Language::English,
+                "fr" | "french" | "francais" => app.settings.language = Language::French,
+                _ => {}
+            }
+        }
+
         if cli_args.showcase {
             app.open_showcase_demo_vault();
             if let Some(sess) = app.sessions.first_mut() {

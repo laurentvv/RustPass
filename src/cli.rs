@@ -35,14 +35,18 @@ pub struct GuiCliArgs {
     /// Optional modal to open immediately on launch (`generator`, `audit`, `editor`, `shortcuts`, `settings`, `palette`).
     #[arg(long = "open-modal")]
     pub open_modal: Option<String>,
+
+    /// Force interface language ('en' for English, 'fr' for French).
+    #[arg(long = "lang")]
+    pub lang: Option<String>,
 }
 
-/// Drop-in `keepassxc-cli` compatible command-line tool (`rustpass-cli.exe`).
+/// Scriptable command-line vault manager (`rustpass-cli.exe`).
 #[derive(Debug, Parser)]
 #[command(
     name = "rustpass-cli",
     version,
-    about = "Drop-in keepassxc-cli compatible KDBX 4.0 & 3.1 command-line vault manager"
+    about = "Modern KDBX 4.0 & 3.1 command-line vault manager in pure Rust"
 )]
 pub struct CliRoot {
     /// Subcommand to execute.

@@ -79,7 +79,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::EmeraldDark,
-            language: Language::French,
+            language: Language::English,
             clipboard_clear_seconds: 12,
             auto_lock_idle_seconds: 300,
             auto_save_on_change: false,

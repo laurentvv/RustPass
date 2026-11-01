@@ -4,28 +4,27 @@
 
 # RustPass
 
-### Clean-Room, Memory-Safe KeePassXC Password Manager Suite in Pure Rust
+### Modern, High-Performance & Memory-Safe Password Manager in Pure Rust
 
 [![Rust Edition](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
-[![KeePassXC Compatibility](https://img.shields.io/badge/KDBX-v4.1%20%7C%20v3.1%20Interop-10B981?style=for-the-badge&logo=keepassxc&logoColor=white)](https://keepassxc.org/)
+[![Format: KDBX 4.1 / 3.1](https://img.shields.io/badge/Format-KDBX%204.1%20%7C%203.1-10B981?style=for-the-badge)](https://keepass.info/)
 [![Clippy](https://img.shields.io/badge/Clippy-0%20Warnings-brightgreen?style=for-the-badge&logo=rust)](https://github.com/rust-lang/rust-clippy)
 [![Tests Passing](https://img.shields.io/badge/Tests-23%2F23%20Passed-success?style=for-the-badge&logo=checkmarx&logoColor=white)](cargo-test)
 [![Memory Safety](https://img.shields.io/badge/Memory-Zeroize%20Protected-orange?style=for-the-badge&logo=shield&logoColor=white)](https://crates.io/crates/zeroize)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-informational?style=for-the-badge)](https://github.com/laurentvv/RustPass)
 
 <p align="center">
-  <b>A modern, high-performance, and memory-safe reimplementation of the KeePassXC v2.8.0 password manager ecosystem.</b><br>
-  Built from clean-room specifications in pure Rust with hardware-accelerated cryptography, zero plaintext secret leakage, and bidirectional binary compatibility with official KeePassXC databases.
+  <b>A modern, high-performance desktop password manager, scriptable CLI, and browser integration built in pure Rust.</b><br>
+  Engineered with memory safety, hardware-accelerated cryptography, zero plaintext secret leakage, and native support for industry-standard KDBX vault files.
 </p>
 
 [Key Features](#key-features) •
-[Screenshots](#interface-showcase) •
-[Architecture](#cryptography--security-architecture) •
+[Interface](#interface-showcase) •
+[Architecture](#security--cryptography-architecture) •
 [Installation](#installation--build) •
-[CLI Quickstart](#cli-cheatsheet-rustpass-cli) •
-[Browser Extension](#browser-integration-rustpass-proxy) •
-[Verification](#verification--interoperability) •
+[CLI Cheatsheet](#cli-cheatsheet-rustpass-cli) •
+[Browser Integration](#browser-integration-rustpass-proxy) •
 [License](#license)
 
 </div>
@@ -34,15 +33,16 @@
 
 ## Overview
 
-**RustPass** is an independent, clean-room implementation of the KeePass password management suite, written in pure Rust (2024 Edition). It delivers a seamless, drop-in alternative to KeePassXC with native GPU-accelerated desktop rendering, an exhaustive 25-subcommand CLI, and a high-throughput browser native messaging proxy.
+**RustPass** is an independent, pure Rust password management suite designed for security, velocity, and ergonomic daily workflows. Built with modern cryptographic guarantees, it offers a GPU-accelerated desktop application, an exhaustive automation CLI, and a high-throughput browser proxy.
 
 ### Why RustPass?
 
-- 🛡️ **Zero Master Secret Leaks:** Master keys, intermediate KDF states, composite credentials, and decrypted secrets are wrapped in `zeroize::Zeroizing` buffers that are securely scrubbed from memory immediately upon drop or database locking.
-- ⚡ **Native GPU Desktop GUI:** Powered by `egui` and `eframe` 0.37 with instant keyboard-first workflows, sub-millisecond search queries, multi-vault tabs, live RFC 6238 TOTP clocks with inline scannable QR codes, and 7 themes (including automatic Windows/system theme matching).
-- 🔄 **100% Binary Interoperability:** Tested directly against official `keepassxc-cli.exe` binaries for round-trip KDBX v4.1, v4.0, and v3.1 vaults.
-- 💾 **Crash-Proof Atomic Saves:** Vault modifications are always written to isolated `.kdbx.tmp` files and atomically renamed over the target to prevent file corruption in case of power loss or disk failure.
-- 🚀 **Zero C++ Legacy Debt:** No Qt/Botan/OpenSSL runtime bloat. Ships lean, self-contained single-file release binaries (1.5 MB – 11 MB) with Thin-LTO and stripped debug symbols.
+- 🛡️ **Zero Secret Leakage:** Master keys, intermediate KDF states, composite credentials, and decrypted secrets are wrapped in `zeroize::Zeroizing` buffers that are deterministically scrubbed from memory immediately upon drop or database locking.
+- ⚡ **Native GPU Desktop Experience:** Built on `egui`/`eframe` 0.37 with instant keyboard-first workflows, sub-millisecond search queries, multi-vault tabs, live RFC 6238 TOTP clocks with scannable QR codes, and 7 themes with automatic OS dark/light mode following.
+- 📂 **Standard KDBX Vault Compatibility:** Natively opens, edits, and creates standard `.kdbx` (v4.1, v4.0, and v3.1) database files. Seamlessly read and write your existing vaults with Argon2id, ChaCha20, and AES-KDF.
+- 💾 **Crash-Proof Atomic Saves:** Vault modifications are always written to an isolated `.kdbx.tmp` file and atomically renamed over the destination path to prevent file corruption in case of power interruption or disk failure.
+- 🌍 **Bilingual by Design:** English by default, with instant runtime switching between English and French (FR/EN).
+- 🚀 **Lean Single-File Binaries:** Zero external runtime dependencies. Self-contained release binaries (1.5 MB – 11 MB) compiled with Thin-LTO and stripped debug symbols.
 
 ---
 
@@ -64,7 +64,7 @@
 
 <br/>
 
-| **Security Health Audit** | **KDF & Security Settings** |
+| **Security Health Audit** | **Database Security Settings** |
 |:---:|:---:|
 | <img src="assets/screenshots/security_audit.png" alt="Security Health Audit Modal" width="100%" /> | <img src="assets/screenshots/database_settings.png" alt="Database Security Settings Modal" width="100%" /> |
 | *Calculates health score (0-100), scans weak, reused, or expired entries.* | *Configure Argon2id, Argon2d, AES-KDF, ChaCha20, or AES-256-CBC.* |
@@ -73,36 +73,36 @@
 
 ---
 
-## Binaries Shipped
+## Suite Components
 
-| Binary | Description | Upstream Counterpart |
+| Binary | Role | Description |
 | :--- | :--- | :--- |
-| **`rustpass.exe`** | GPU-accelerated desktop password manager with multi-vault tabs and command palette (`Ctrl+Shift+P`). | `KeePassXC.exe` |
-| **`rustpass-cli.exe`** | Comprehensive 25-subcommand scriptable CLI for automation, head-less servers, and terminal workflows. | `keepassxc-cli.exe` |
-| **`rustpass-proxy.exe`** | High-throughput `u32 LE` JSON stdio Native Messaging host connecting KeePassXC-Browser extensions. | `keepassxc-proxy.exe` |
+| **`rustpass.exe`** | Desktop GUI | GPU-accelerated desktop password manager with multi-vault tabs, command palette (`Ctrl+Shift+P`), and live TOTP clock. |
+| **`rustpass-cli.exe`** | Automation CLI | Full-featured 25-subcommand CLI for scripting, headless servers, and terminal workflows. |
+| **`rustpass-proxy.exe`** | Browser Proxy | High-throughput `u32 LE` JSON stdio Native Messaging host for browser auto-fill integration. |
 
 ---
 
 ## Key Features
 
 ### 🔐 Cryptography & Vault Formats
-- **Full KDBX v4.1, v4.0 & v3.1 Support:** Complete parser, serializer, and block stream validator.
+- **Standard KDBX Format:** Full support for KDBX v4.1, v4.0, and v3.1 vault files.
 - **Key Derivation Functions (KDF):**
-  - **Argon2id & Argon2d** (configurable memory, iteration passes, and parallelism lanes).
-  - Hardware-accelerated **AES-KDF** (KDBX 3.1 & 4.x compatibility).
+  - **Argon2id & Argon2d** with configurable memory cost, iterations, and lanes.
+  - Hardware-accelerated **AES-KDF** for backward and cross-platform compatibility.
 - **Ciphers & Block Stream Integrity:**
   - **ChaCha20** (256-bit, RFC 8439) with HMAC-SHA-256 block stream authentication.
   - **AES-256-CBC** with PKCS#7 padding and HMAC-SHA-256 verification.
   - Inner stream protection using **ChaCha20** or **Salsa20** for memory-sensitive attributes and binary attachments.
-- **Composite Key Credentials:**
+- **Flexible Credentials:**
   - Master Passwords.
   - XML v2.0 `.keyx` Key Files (with 4-byte SHA-256 integrity hash), XML v1.0, 64-hex strings, and 32-byte raw binary files.
-  - Dual password + keyfile composite credentials.
+  - Composite credentials combining passwords and key files.
 
 ### ⏱️ Two-Factor Authentication (TOTP & Steam Guard)
-- **RFC 6238 & RFC 4226 Compliance:** HMAC-SHA1, HMAC-SHA256, and HMAC-SHA512 algorithms.
+- **RFC 6238 & RFC 4226:** HMAC-SHA1, HMAC-SHA256, and HMAC-SHA512 algorithms.
 - **Custom Parameters:** 6 to 10 digits, custom time steps (10s, 30s, 60s), and counter-based HOTP.
-- **Steam Guard Support:** Alphanumeric 5-character token generation.
+- **Steam Guard:** Alphanumeric 5-character token generation.
 - **Integrated QR Code Generator:** Pure-Rust ISO/IEC 18004 QR encoder rendering scannable `otpauth://` matrices in the GUI.
 
 ### 🛡️ Security Health Audit & Password Generation
@@ -115,12 +115,12 @@
 - **Command Palette:** Instant quick navigation with `Ctrl+Shift+P` to switch groups, trigger audit, or generate credentials.
 - **Structured Search Grammar:** Filter with syntax like `u:alice is:totp -g:Archive | t:GitHub`.
 - **Auto-Type Integration:** Windows `SendInput` Unicode keystroke emulation (`Ctrl+V`).
-- **Timed Clipboard Clearing:** Configurable clipboard clearing timer (default 10s) with active countdown.
-- **Bilingual Interface:** Instant runtime switching between English and French (FR/EN).
+- **Timed Clipboard Clearing:** Configurable clipboard clearing timer (default 12s) with active countdown.
+- **Bilingual Interface:** English by default, with instant runtime switching to French (FR/EN).
 
 ---
 
-## Cryptography & Security Architecture
+## Security & Cryptography Architecture
 
 ```
 [ Master Password ] + [ Key File (.keyx) ]
@@ -149,7 +149,7 @@
 ## Installation & Build
 
 ### Prerequisites
-- **Rust:** Rust 1.85+ (Edition 2024 supported).
+- **Rust:** Rust 1.85+ (Edition 2024).
 - **Cargo:** Bundled with Rust toolchain.
 - **Platform:** Windows 10/11, Linux (X11/Wayland), macOS 12+.
 
@@ -180,7 +180,7 @@ Release binaries will be generated in `target/release/`:
 
 ## CLI Cheatsheet (`rustpass-cli`)
 
-`rustpass-cli` provides 25 scriptable subcommands compatible with KeePassXC automation:
+`rustpass-cli` provides 25 scriptable subcommands for automated vault operations:
 
 ```powershell
 # 1. Create a new KDBX v4.1 vault with Argon2id and a generated XML v2.0 keyfile
@@ -222,17 +222,15 @@ rustpass-cli import -f csv backup.csv imported.kdbx
 1. **Manifest Installation:**
    Register the manifest in Windows Registry or Linux/macOS Application Support:
    - Key: `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.keepassxc.keepassxc_browser`
-2. **KeePassXC-Browser Extension:**
-   Works seamlessly with the official KeePassXC-Browser extension on Chrome, Firefox, Brave, and Edge for auto-fill, credential fetching, and form submission.
+2. **Browser Extension Compatibility:**
+   Integrates directly with standard browser password manager extensions on Chrome, Firefox, Brave, and Edge for auto-fill, credential lookup, and secure form filling.
 
 ---
 
-## Verification & Interoperability
+## Verification & Testing
 
-RustPass has been verified through a rigorous dual verification matrix:
-
-- **Official KeePassXC Interoperability:**
-  Cross-binary tests are executed against official `C:\Program Files\KeePassXC\keepassxc-cli.exe`. Databases created in RustPass decrypt identically in KeePassXC, and databases created in KeePassXC decrypt cleanly in RustPass without loss of history or attributes.
+- **KDBX Format Interoperability:**
+  Cross-binary tests verify round-trip integrity for standard KDBX 4.1, 4.0, and 3.1 databases.
 - **Automated GUI Test Suite:**
   7 comprehensive headless GUI workflow tests validate database creation, nested group tree mutations, 6-tab entry editor modifications, live TOTP ticks, Diceware generators, and session locking.
 - **Zeroize Memory Verification:**
@@ -262,7 +260,7 @@ RustPass/
 │   ├── totp/                # RFC 6238 TOTP, Steam Guard & QR code encoder
 │   └── ui/                  # 3-pane layout, modals, command palette, themes
 └── tests/
-    └── cli_integration.rs   # Cross-binary test against official KeePassXC
+    └── cli_integration.rs   # Cross-binary integration test suite
 ```
 
 ---
@@ -270,6 +268,3 @@ RustPass/
 ## License
 
 This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
-### Clean-Room Attestation
-*RustPass is a clean-room implementation authored from public RFCs (`RFC 4226`, `RFC 6238`, `RFC 8439`, `RFC 4180`), official KeePass 2.x KDBX File Format specifications, and black-box behavioral testing. It contains no proprietary, decompiled, or non-permissive source code.*
