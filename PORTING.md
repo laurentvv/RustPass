@@ -36,3 +36,46 @@ To keep `RustPass` self-contained, auditable, and free of hardware/driver depend
 - **Hardware YubiKey USB HID Challenge-Response (`-y / --yubikey`)**: Requires `libyubikey` / Windows USB HID smartcard drivers; `.keyx` 256-bit key files are supported instead.
 - **KeeShare Signed Container Sync & Freedesktop Secret Service (`org.freedesktop.secrets`)**: Linux D-Bus specific or multi-user PKI sharing workflows; standard UUID+timestamp KDBX `merge` is supported in both GUI and CLI.
 - **Built-in SSH Agent (`Pageant` / Named Pipe)**: Dedicated SSH key management lives in sibling repository `cuty-ssh`; SSH keys can be stored as protected KDBX 4 Inner Header binary attachments.
+
+## 4. Hardening Deviations & Rationale (2026-11 review sprint)
+
+The full code review of 2026-11 introduced deliberate behavior deviations from KeePassXC,
+each with a security or data-integrity rationale:
+
+- **Unauthenticated KDF parameters are range-checked on read** (`P ≤ 64`, `8 KiB ≤ M ≤ 2 GiB`,
+  `I ≤ 10M`, AES-KDF `1 ≤ R ≤ 100M`, Argon2 `V ∈ {0x10, 0x13}`): hostile KDBX headers can no
+  longer trigger an out-of-memory abort or an unbounded derivation loop before the header HMAC
+  is verified. Out-of-range values error with `CorruptedFormat` instead of a misleading
+  "wrong password". The same bounds apply to KDBX 3.1 `TransformRounds`.
+- **XML serialization drops characters forbidden by XML 1.0** (C0 controls except tab/LF/CR,
+  `U+FFFE`/`U+FFFF`): writing them verbatim produced vaults no XML parser (ours, KeePassXC,
+  KeePass) could reopen — silent self-inflicted corruption. KeePassXC sanitizes similarly.
+- **GZip decompression is capped at 1 GiB** to block decompression bombs from shared vaults.
+- **Malformed UUIDs and timestamps are hard errors.** KeePassXC also errors; the previous
+  behavior (random UUID / `Utc::now()` on every open) churned entry identity and could flip
+  expiry semantics. An *empty* UUID is still the KeePass "none" (nil) UUID; an *empty*
+  timestamp is the deterministic epoch, never `now()`.
+- **KDBX 3.1 files missing `ProtectedStreamKey` are rejected**: "decrypting" with an empty
+  key silently produced mojibake protected values.
+- **`save_atomic` fsyncs the `.kdbx.tmp` before renaming** (power-loss durability) and removes
+  the temp file if the rename fails; `settings.json` is written atomically too.
+- **The plaintext-XML save path is fully `Zeroizing`** (`serialize_keepass_xml` returns
+  `Zeroizing<String>`, as do the compressed/payload intermediates).
+- **`ProtectedString` serializes as `"***"` through serde**: an accidental
+  `serde_json::to_*(…)` can never dump secrets; use `as_str()` explicitly.
+- **HOTP (`otpauth://hotp/…`) URIs are rejected with `UnsupportedFeature`** instead of being
+  silently mistreated as time-based codes (KeePassXC-compatible HOTP is future work).
+- **`rustpass-proxy` refuses to return credentials in plaintext** (`get-logins`,
+  `associate`, `test-associate` answer an explicit error) until a real KeePassXC-Browser
+  encrypted channel (NaCl box over `change-public-keys`) exists. Local integration testing
+  can opt in with `RUSTPASS_ALLOW_PLAINTEXT_LOGINS=1` (loudly warned).
+- **Idle auto-lock saves dirty vaults before locking** (KeePassXC keeps them in memory; we
+  cannot, since locking drops the decrypted `Database`); path-less unsaved vaults stay open
+  rather than losing edits. Manual `Ctrl+L` saves-then-locks any vault.
+- **Auto-Type unknown placeholders and malformed `{DELAY=…}` are hard errors**, `{CLEARFIELD}`
+  is actually implemented (`Ctrl+A`, `Delete`), and partial `SendInput` batches are detected.
+- **The shortcuts (F1) and About help windows remain English-only** (documentation content);
+  every interactive surface is localized FR/EN.
+- **`rustpass-cli` runs on a 16 MiB worker thread**: the unoptimized debug build of the deep
+  `clap` derive overflows the default 1 MiB Windows main-thread stack; release builds are
+  unaffected.
