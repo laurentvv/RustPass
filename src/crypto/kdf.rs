@@ -49,9 +49,13 @@ impl MasterCredentials {
 
     /// Computes `CompositeKey = SHA-256(SHA-256(password) || keyfile_32_bytes)` over active components.
     pub fn composite_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        let loaded;
         let resolved_kf = match (&self.keyfile_key, &self.keyfile_path) {
-            (Some(k), _) => Some(k.clone()),
-            (None, Some(path)) => Some(load_keyfile(path)?),
+            (Some(k), _) => Some(k),
+            (None, Some(path)) => {
+                loaded = Some(load_keyfile(path)?);
+                loaded.as_ref()
+            }
             (None, None) => None,
         };
 
@@ -66,7 +70,7 @@ impl MasterCredentials {
             let pw_hash = Zeroizing::new(Sha256::digest(pw.as_str().as_bytes()));
             outer.update(*pw_hash);
         }
-        if let Some(ref kf) = resolved_kf {
+        if let Some(kf) = resolved_kf {
             outer.update(**kf);
         }
 
@@ -97,7 +101,12 @@ pub fn derive_transformed_key(
             };
             let ver = match version {
                 0x10 => Version::V0x10,
-                _ => Version::V0x13,
+                0x13 => Version::V0x13,
+                other => {
+                    return Err(RustPassError::Crypto(format!(
+                        "Unsupported Argon2 version 0x{other:x}"
+                    )));
+                }
             };
             let m_cost_kib = u32::try_from(*memory_bytes / 1024).map_err(|_| {
                 RustPassError::Crypto("Argon2 memory cost exceeds u32 KiB limit".to_string())
@@ -120,6 +129,11 @@ pub fn derive_transformed_key(
             Ok(out)
         }
         KdfConfig::AesKdf { rounds, seed } => {
+            if *rounds == 0 || *rounds > crate::kdbx::variant_dict::AES_KDF_MAX_ROUNDS {
+                return Err(RustPassError::Crypto(format!(
+                    "AES-KDF round count outside the safe range: {rounds}"
+                )));
+            }
             let key = Array::from(*seed);
             let cipher = Aes256::new(&key);
 
@@ -129,6 +143,8 @@ pub fn derive_transformed_key(
             right.copy_from_slice(&composite_key[16..32]);
 
             let mut blocks = [Array::from(left), Array::from(right)];
+            left.fill(0);
+            right.fill(0);
             for _ in 0..*rounds {
                 cipher.encrypt_blocks(&mut blocks);
             }

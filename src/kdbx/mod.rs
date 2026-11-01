@@ -135,8 +135,14 @@ impl Database {
                 let stream_algo = header
                     .v3_inner_stream_algo
                     .unwrap_or(InnerStreamAlgorithm::Salsa20);
-                let empty_key = Zeroizing::new(Vec::new());
-                let stream_key = header.v3_inner_stream_key.as_ref().unwrap_or(&empty_key);
+                // Every KeePass 2.x writer emits `ProtectedStreamKey`; a file without
+                // one is malformed and "decrypting" with an empty key would silently
+                // produce mojibake protected values.
+                let stream_key = header.v3_inner_stream_key.as_ref().ok_or_else(|| {
+                    RustPassError::CorruptedFormat(
+                        "KDBX 3.1 header is missing the ProtectedStreamKey".to_string(),
+                    )
+                })?;
                 let mut stream = InnerStream::new(stream_algo, stream_key);
 
                 let (meta, root, deleted_objects) = parse_keepass_xml(xml_str, &mut stream, &[])?;
@@ -171,7 +177,8 @@ impl Database {
             self.cipher = CipherAlgorithm::Aes256Cbc;
             if matches!(self.kdf, KdfConfig::Argon2 { .. }) {
                 self.kdf = KdfConfig::AesKdf {
-                    rounds: 100_000,
+                    // KeePassXC's AES-KDF default: 100k rounds is trivially brute-forceable today.
+                    rounds: 600_000,
                     seed: new_salt,
                 };
             }
@@ -212,11 +219,11 @@ impl Database {
                 let mut raw_inner = Zeroizing::new(inner_hdr.encode());
                 raw_inner.extend_from_slice(xml_str.as_bytes());
 
-                let compressed = if self.compression_gzip {
+                let compressed = Zeroizing::new(if self.compression_gzip {
                     gzip_bytes(&raw_inner)?
                 } else {
                     raw_inner.to_vec()
-                };
+                });
 
                 let ciphertext = encrypt_payload(self.cipher, &master_key, &iv, &compressed)?;
 
@@ -259,11 +266,11 @@ impl Database {
                     &mut stream,
                 )?;
 
-                let payload = if self.compression_gzip {
+                let payload = Zeroizing::new(if self.compression_gzip {
                     gzip_bytes(xml_str.as_bytes())?
                 } else {
-                    xml_str.into_bytes()
-                };
+                    xml_str.as_bytes().to_vec()
+                });
                 let hashed_blocks = write_hashed_block_stream_v3(&payload);
 
                 let mut plain_stream = Zeroizing::new(Vec::with_capacity(32 + hashed_blocks.len()));
@@ -292,7 +299,13 @@ impl Database {
     }
 
     /// Atomically saves the encrypted `.kdbx` vault to `path` via a sibling `.kdbx.tmp` file.
+    ///
+    /// The temp file is flushed **and fsynced** before the rename so a power loss
+    /// can never leave the destination pointing at unflushed data blocks, and a
+    /// failed rename cleans the `.tmp` up.
     pub fn save_atomic(&mut self, path: &Path, credentials: &MasterCredentials) -> Result<()> {
+        use std::io::Write as _;
+
         let bytes = self.to_kdbx_bytes(credentials)?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -306,8 +319,17 @@ impl Database {
                 .unwrap_or("vault.kdbx")
         );
         let tmp_path = path.with_file_name(tmp_name);
-        std::fs::write(&tmp_path, &bytes)?;
-        std::fs::rename(&tmp_path, path)?;
+
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            // The original vault is untouched; drop the orphaned temp file.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
         Ok(())
     }
 }
