@@ -86,6 +86,7 @@ pub fn load_wordlist_file(path: &Path) -> Result<Vec<String>> {
 #[must_use]
 pub fn parse_wordlist_str(raw: &str) -> Vec<String> {
     let mut words = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -96,18 +97,24 @@ pub fn parse_wordlist_str(raw: &str) -> Vec<String> {
             Some((prefix, rest)) if prefix.chars().all(|c| c.is_ascii_digit()) => rest.trim(),
             _ => trimmed,
         };
-        if !token.is_empty() {
+        // Deduplicate: index-based entropy math assumes distinct words.
+        if !token.is_empty() && seen.insert(token) {
             words.push(token.to_string());
         }
     }
     words
 }
 
+/// The official EFF large wordlist (7 776 words, dice-indexed), embedded so strong
+/// Diceware passphrases (12.9 bits/word) work out of the box with no host install.
+pub const EFF_LARGE_WORDLIST_RAW: &str = include_str!("eff_large.wordlist");
+
 /// Resolves the best available Diceware word list:
 /// 1. Explicit `custom_path` if supplied,
 /// 2. Standard host EFF Large Wordlist (`C:\Program Files\KeePassXC\share\wordlists\eff_large.wordlist`
 ///    or `/usr/share/keepassxc/wordlists/eff_large.wordlist`) if readable,
-/// 3. Built-in `EMBEDDED_WORDLIST`.
+/// 3. Embedded official EFF large wordlist (7 776 words),
+/// 4. Built-in compact `EMBEDDED_WORDLIST`.
 pub fn resolve_wordlist(custom_path: Option<&Path>) -> Result<Vec<String>> {
     if let Some(p) = custom_path {
         return load_wordlist_file(p);
@@ -125,6 +132,12 @@ pub fn resolve_wordlist(custom_path: Option<&Path>) -> Result<Vec<String>> {
         {
             return Ok(list);
         }
+    }
+
+    // Embedded official EFF large list: no host install needed.
+    let eff = parse_wordlist_str(EFF_LARGE_WORDLIST_RAW);
+    if eff.len() >= 32 {
+        return Ok(eff);
     }
 
     Ok(EMBEDDED_WORDLIST.iter().map(|&w| w.to_string()).collect())
