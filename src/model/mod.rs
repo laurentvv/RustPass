@@ -61,7 +61,9 @@ impl Serialize for ProtectedString {
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
+        // Redaction by default: an accidental `serde_json::to_*(&entry)` must never
+        // write secrets to disk. Use `as_str()` explicitly where plaintext is intended.
+        serializer.serialize_str("***")
     }
 }
 
@@ -518,7 +520,12 @@ impl Entry {
         protected: bool,
     ) {
         let key_str = key.into();
-        if let Some(existing) = self.custom_attributes.iter_mut().find(|a| a.key == key_str) {
+        // Case-insensitive like `get_attribute`, so "API_KEY" and "api_key" are one attribute.
+        if let Some(existing) = self
+            .custom_attributes
+            .iter_mut()
+            .find(|a| a.key.eq_ignore_ascii_case(&key_str))
+        {
             existing.value = ProtectedString::new(value);
             existing.protected = protected;
         } else {
@@ -1031,6 +1038,115 @@ impl Database {
         None
     }
 
+    /// Removes a non-root group (and its whole subtree) by `Uuid`, recording tombstones
+    /// for the group, every nested subgroup, and every contained entry.
+    pub fn remove_group_by_uuid(&mut self, uuid: Uuid) -> Result<()> {
+        if uuid == self.root.uuid {
+            return Err(RustPassError::InvalidArgument(
+                "Cannot remove the root group".to_string(),
+            ));
+        }
+        fn find_parent(group: &mut Group, uuid: Uuid) -> Option<&mut Group> {
+            if group.children.iter().any(|c| c.uuid == uuid) {
+                return Some(group);
+            }
+            for child in &mut group.children {
+                if let Some(found) = find_parent(child, uuid) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let parent = find_parent(&mut self.root, uuid)
+            .ok_or_else(|| RustPassError::GroupNotFound(uuid.to_string()))?;
+        let pos = parent
+            .children
+            .iter()
+            .position(|g| g.uuid == uuid)
+            .ok_or_else(|| RustPassError::GroupNotFound(uuid.to_string()))?;
+        let removed = parent.children.remove(pos);
+
+        let now = Utc::now();
+        let mut entries = Vec::new();
+        removed.collect_entries("", &mut entries);
+        for (_, e) in entries {
+            self.deleted_objects.push(DeletedObject {
+                uuid: e.uuid,
+                deletion_time: now,
+            });
+        }
+        let mut group_uuids = Vec::new();
+        collect_group_uuids(&removed, &mut group_uuids);
+        for gid in group_uuids {
+            self.deleted_objects.push(DeletedObject {
+                uuid: gid,
+                deletion_time: now,
+            });
+        }
+        Ok(())
+    }
+
+    /// Restores an entry from the Recycle Bin back into the vault root group.
+    pub fn restore_entry_from_recycle_bin(&mut self, entry_uuid: Uuid) -> Result<()> {
+        if !self.is_in_recycle_bin(entry_uuid) {
+            return Err(RustPassError::InvalidArgument(
+                "Entry is not in the Recycle Bin".to_string(),
+            ));
+        }
+        let Some(mut entry) = Self::take_entry_from_group(&mut self.root, entry_uuid) else {
+            return Err(RustPassError::EntryNotFound(entry_uuid.to_string()));
+        };
+        entry.times.location_changed = Utc::now();
+        // The original parent may have been deleted meanwhile: root is the safe target.
+        self.root.entries.push(entry);
+        self.deleted_objects.retain(|d| d.uuid != entry_uuid);
+        Ok(())
+    }
+
+    /// Permanently deletes every entry inside the Recycle Bin (and their tombstones).
+    /// Returns how many entries were destroyed.
+    pub fn empty_recycle_bin(&mut self) -> Result<usize> {
+        if self.meta.recycle_bin_uuid.is_nil() {
+            return Ok(0);
+        }
+        let Some(bin) = self.root.find_group_by_uuid_mut(self.meta.recycle_bin_uuid) else {
+            return Ok(0);
+        };
+        let removed_uuids: Vec<Uuid> = bin.entries.iter().map(|e| e.uuid).collect();
+        let count = removed_uuids.len();
+        bin.entries.clear();
+        // Clear sub-groups of the bin as well (nested deletes), keeping the bin itself.
+        bin.children.clear();
+        let now = Utc::now();
+        for uuid in removed_uuids {
+            self.deleted_objects.push(DeletedObject {
+                uuid,
+                deletion_time: now,
+            });
+        }
+        Ok(count)
+    }
+
+    /// Renames a non-root group by `Uuid`.
+    pub fn rename_group_by_uuid(&mut self, uuid: Uuid, new_name: &str) -> Result<()> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(RustPassError::InvalidArgument(
+                "Group name cannot be empty".to_string(),
+            ));
+        }
+        if uuid == self.root.uuid {
+            return Err(RustPassError::InvalidArgument(
+                "Rename the vault via Database Settings instead".to_string(),
+            ));
+        }
+        let Some(group) = self.root.find_group_by_uuid_mut(uuid) else {
+            return Err(RustPassError::GroupNotFound(uuid.to_string()));
+        };
+        group.name = name.to_string();
+        Ok(())
+    }
+
     /// Moves an entry (`entry_path`) into `dest_group_path`.
     pub fn move_entry(&mut self, entry_path: &str, dest_group_path: &str) -> Result<()> {
         let uuid = self.resolve_entry(entry_path)?.uuid;
@@ -1047,7 +1163,8 @@ impl Database {
         Ok(())
     }
 
-    /// Removes a non-root group at `group_path` and records tombstones for it and its entries.
+    /// Removes a non-root group at `group_path` and records tombstones for it, its entries
+    /// and every nested subgroup.
     pub fn remove_group(&mut self, group_path: &str) -> Result<()> {
         let segs = self.normalize_segments(group_path);
         let Some((&target_name, parent_segs)) = segs.split_last() else {
@@ -1074,10 +1191,16 @@ impl Database {
                 deletion_time: now,
             });
         }
-        self.deleted_objects.push(DeletedObject {
-            uuid: removed_group.uuid,
-            deletion_time: now,
-        });
+        // Tombstone every nested subgroup as well, or a later merge from a peer that
+        // still holds them would resurrect them.
+        let mut group_uuids = Vec::new();
+        collect_group_uuids(&removed_group, &mut group_uuids);
+        for uuid in group_uuids {
+            self.deleted_objects.push(DeletedObject {
+                uuid,
+                deletion_time: now,
+            });
+        }
         Ok(())
     }
 
@@ -1219,5 +1342,77 @@ impl Database {
                 report,
             );
         }
+    }
+}
+
+/// Collects `group` and every nested subgroup UUID (used for merge tombstones).
+fn collect_group_uuids(group: &Group, out: &mut Vec<Uuid>) {
+    out.push(group.uuid);
+    for child in &group.children {
+        collect_group_uuids(child, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_custom_attribute_upserts_case_insensitively() {
+        let mut e = Entry::new("X");
+        e.set_custom_attribute("API_KEY", "one", true);
+        e.set_custom_attribute("api_key", "two", true);
+        assert_eq!(e.custom_attributes.len(), 1, "same key, different case");
+        assert_eq!(e.get_attribute("Api_Key"), Some("two"));
+    }
+
+    #[test]
+    fn remove_group_tombstones_every_nested_subgroup() {
+        let mut db = Database::new("T");
+        db.add_entry_at_path("A/B/entry", Entry::new("entry"))
+            .expect("add nested");
+        let uuid_a = db.resolve_group("A").expect("A").uuid;
+        let uuid_b = db.resolve_group("A/B").expect("B").uuid;
+        db.remove_group("A").expect("remove");
+        assert!(db.deleted_objects.iter().any(|d| d.uuid == uuid_a));
+        assert!(db.deleted_objects.iter().any(|d| d.uuid == uuid_b));
+    }
+
+    #[test]
+    fn recycle_bin_restore_and_empty() {
+        let mut db = Database::new("R");
+        let uuid = db
+            .add_entry_at_path("Src/Thing", Entry::new("Thing"))
+            .expect("add");
+        db.delete_entry_by_uuid(uuid, false).expect("to bin");
+        assert!(db.is_in_recycle_bin(uuid));
+
+        db.restore_entry_from_recycle_bin(uuid).expect("restore");
+        assert!(!db.is_in_recycle_bin(uuid));
+        assert!(db.root.entries.iter().any(|e| e.uuid == uuid));
+        assert!(!db.deleted_objects.iter().any(|d| d.uuid == uuid));
+
+        db.delete_entry_by_uuid(uuid, false).expect("to bin again");
+        assert_eq!(db.empty_recycle_bin().expect("empty"), 1);
+        assert!(db.root.find_entry_by_uuid(uuid).is_none());
+    }
+
+    #[test]
+    fn rename_group_by_uuid_rejects_root_and_empty() {
+        let mut db = Database::new("R");
+        let _ = db.mkdir_p("A/B");
+        let a_id = db.resolve_group("A").expect("A").uuid;
+        db.rename_group_by_uuid(a_id, "Renamed").expect("rename");
+        assert!(db.resolve_group("Renamed").is_ok());
+        assert!(db.rename_group_by_uuid(a_id, "  ").is_err());
+        assert!(db.rename_group_by_uuid(db.root.uuid, "X").is_err());
+    }
+
+    #[test]
+    fn protected_string_serializes_redacted() {
+        let e = Entry::new("S");
+        let json = serde_json::to_string(&e.password).expect("serde");
+        assert_eq!(json, "\"***\"");
+        assert!(!json.contains("secret"));
     }
 }
