@@ -33,6 +33,7 @@ chacha20 = { version = "0.10.2", features = ["cipher", "zeroize"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 cipher = { version = "0.5.2", features = ["alloc", "block-padding", "zeroize"] }
 clap = { version = "4.6.7", features = ["derive"] }
+crypto_box = "0.9.1"
 data-encoding = "2.11.1"
 dirs = "7.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow"] }

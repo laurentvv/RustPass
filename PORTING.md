@@ -79,3 +79,20 @@ each with a security or data-integrity rationale:
 - **`rustpass-cli` runs on a 16 MiB worker thread**: the unoptimized debug build of the deep
   `clap` derive overflows the default 1 MiB Windows main-thread stack; release builds are
   unaffected.
+- **HOTP is fully supported** (RFC 4226 vectors pinned; the GUI increments the counter after
+  each use), and Google Authenticator exports (`otpauth-migration://offline`) import via a
+  hand-rolled minimal protobuf decoder (`rustpass-cli otp-import`).
+- **KDBX 4.1 metadata is preserved on round-trip**: `Meta/CustomIcons`, entry/group
+  `<CustomData>` (KeePassXC-Browser settings), `<PreviousParentGroup>`, `<QualityCheck>` and
+  the UI-state group references (`EntryTemplatesGroup`, `LastSelectedGroup`,
+  `LastTopVisibleGroup`) are parsed and written back instead of being reset.
+- **All vault crypto runs off the UI thread** (open/create/save/unlock/merge): the window
+  stays responsive (spinner + localized progress) while Argon2 derives; a headless test
+  drives the spawn → poll → apply cycle.
+- **Copied secrets are excluded from the Windows clipboard history** (Win+V) and cloud
+  monitoring via arboard's `exclude_from_history`/`exclude_from_monitoring`.
+- **The proxy implements the KeePassXC-Browser encrypted channel** (X25519 key exchange +
+  NaCl box via `crypto_box`, response nonce = client nonce + 1): `associate` persists an
+  id → idKey association for the proxy process, `test-associate` verifies it, and
+  `get-logins` only ever emits credentials inside the box. Plaintext responses remain a
+  loudly-warned `RUSTPASS_ALLOW_PLAINTEXT_LOGINS=1` test-only opt-in.

@@ -225,8 +225,8 @@ rustpass-cli import -f csv backup.csv imported.kdbx
 
 1. **Manifest Generation:**
    `rustpass-proxy --print-chromium-manifest` prints a ready-to-register manifest (register it under `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.keepassxc.keepassxc_browser`).
-2. **Honest Security Boundary:**
-   The KeePassXC-Browser *encrypted* channel (NaCl box negotiated over `change-public-keys`) is not implemented, so the proxy **refuses to return credentials in plaintext** — `get-logins`, `associate`, and `test-associate` answer an explicit error instead of leaking vault passwords to any process that reaches the pipe. Non-secret actions (`ping`, `get-databasehash`, `generate-password`) work today; local integration tests can opt into plaintext responses with `RUSTPASS_ALLOW_PLAINTEXT_LOGINS=1` (loudly warned on stderr).
+2. **Encrypted Channel (KeePassXC-Browser v7 protocol):**
+   `change-public-keys` performs a real X25519 key exchange (ephemeral server keypair per process, via `crypto_box`/NaCl box), and every later action — `associate`, `test-associate`, `get-databasehash`, `generate-password`, **`get-logins`** — travels inside a NaCl box (`base64(nonce || box(json))`, response nonce = client nonce + 1). Credentials are only ever emitted encrypted. Associations (id → idKey) are stored for the proxy process lifetime; plaintext responses require the explicit `RUSTPASS_ALLOW_PLAINTEXT_LOGINS=1` test opt-in (loudly warned on stderr).
 
 ---
 
