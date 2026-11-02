@@ -6,8 +6,8 @@ use crate::crypto::cipher::InnerStream;
 use crate::error::{Result, RustPassError};
 use crate::kdbx::header::InnerBinary;
 use crate::model::{
-    Attachment, AutoType, AutoTypeAssociation, CustomAttribute, Database, DeletedObject, Entry,
-    Group, Meta, ProtectedString, Times,
+    Attachment, AutoType, AutoTypeAssociation, CustomAttribute, CustomIcon, Database,
+    DeletedObject, Entry, Group, Meta, ProtectedString, Times,
 };
 use base64::Engine as _;
 use chrono::{DateTime, TimeZone, Utc};
@@ -172,32 +172,86 @@ fn parse_meta(node: Node<'_, '_>, v3_binaries: &mut HashMap<usize, InnerBinary>)
                 }
             }
             "CustomData" => {
-                for item in child
+                meta.custom_data = parse_custom_data_items(child);
+            }
+            "CustomIcons" => {
+                for icon_node in child
                     .children()
-                    .filter(|n| n.is_element() && n.has_tag_name("Item"))
+                    .filter(|n| n.is_element() && n.has_tag_name("Icon"))
                 {
-                    let key = item
+                    let uuid_text = icon_node
                         .children()
-                        .find(|n| n.has_tag_name("Key"))
+                        .find(|n| n.has_tag_name("UUID"))
                         .and_then(|n| n.text())
-                        .unwrap_or("")
-                        .to_string();
-                    let val = item
+                        .unwrap_or("");
+                    let data_text = icon_node
                         .children()
-                        .find(|n| n.has_tag_name("Value"))
+                        .find(|n| n.has_tag_name("Data"))
                         .and_then(|n| n.text())
-                        .unwrap_or("")
-                        .to_string();
-                    if !key.is_empty() {
-                        meta.custom_data.insert(key, val);
+                        .unwrap_or("");
+                    if uuid_text.is_empty() || data_text.is_empty() {
+                        continue;
+                    }
+                    let Ok(bytes) = base64::engine::general_purpose::STANDARD
+                        .decode(data_text.trim().as_bytes())
+                    else {
+                        continue;
+                    };
+                    if let Ok(uuid) = parse_uuid(uuid_text) {
+                        meta.custom_icons.push(CustomIcon { uuid, data: bytes });
                     }
                 }
             }
+            "EntryTemplatesGroup" => meta.entry_templates_group = parse_uuid(text).ok(),
+            "LastSelectedGroup" => meta.last_selected_group = parse_uuid(text).ok(),
+            "LastTopVisibleGroup" => meta.last_top_visible_group = parse_uuid(text).ok(),
             _ => {}
         }
     }
 
     Ok(meta)
+}
+
+/// Parses a `<CustomData>` block of `<Item><Key/><Value/></Item>` pairs.
+fn parse_custom_data_items(node: Node<'_, '_>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for item in node
+        .children()
+        .filter(|n| n.is_element() && n.has_tag_name("Item"))
+    {
+        let key = item
+            .children()
+            .find(|n| n.has_tag_name("Key"))
+            .and_then(|n| n.text())
+            .unwrap_or("")
+            .to_string();
+        let val = item
+            .children()
+            .find(|n| n.has_tag_name("Value"))
+            .and_then(|n| n.text())
+            .unwrap_or("")
+            .to_string();
+        if !key.is_empty() {
+            out.insert(key, val);
+        }
+    }
+    out
+}
+
+/// Writes a `<CustomData>` block when `data` is non-empty (no-op otherwise).
+fn write_custom_data_block(xml: &mut String, depth: usize, data: &HashMap<String, String>) {
+    if data.is_empty() {
+        return;
+    }
+    let indent = "\t".repeat(depth);
+    xml.push_str(&format!("{indent}<CustomData>\n"));
+    for (key, val) in data {
+        xml.push_str(&format!("{indent}\t<Item>\n"));
+        write_tag(xml, depth + 2, "Key", key);
+        write_tag(xml, depth + 2, "Value", val);
+        xml.push_str(&format!("{indent}\t</Item>\n"));
+    }
+    xml.push_str(&format!("{indent}</CustomData>\n"));
 }
 
 fn parse_group(
@@ -217,6 +271,8 @@ fn parse_group(
             "Notes" => group.notes = child.text().unwrap_or("").to_string(),
             "IconID" => group.icon_id = text.parse().unwrap_or(48),
             "Times" => group.times = parse_times(child)?,
+            "PreviousParentGroup" => group.previous_parent_group = parse_uuid(text).ok(),
+            "CustomData" => group.custom_data = parse_custom_data_items(child),
             "IsExpanded" => group.is_expanded = parse_bool(text),
             "DefaultAutoTypeSequence" => {
                 group.default_autotype_sequence = child.text().unwrap_or("").to_string();
@@ -263,6 +319,8 @@ fn parse_entry(
                     .collect();
             }
             "Times" => entry.times = parse_times(child)?,
+            "QualityCheck" => entry.quality_check = Some(parse_bool(text)),
+            "CustomData" => entry.custom_data = parse_custom_data_items(child),
             "String" => {
                 let key = child
                     .children()
@@ -582,7 +640,23 @@ fn write_meta(
     write_tag(xml, 3, "ProtectNotes", bool_str(meta.protect_notes));
     xml.push_str("\t\t</MemoryProtection>\n");
 
-    xml.push_str("\t\t<CustomIcons/>\n");
+    if meta.custom_icons.is_empty() {
+        xml.push_str("\t\t<CustomIcons/>\n");
+    } else {
+        xml.push_str("\t\t<CustomIcons>\n");
+        for icon in &meta.custom_icons {
+            xml.push_str("\t\t\t<Icon>\n");
+            write_tag(xml, 4, "UUID", &encode_uuid(icon.uuid));
+            write_tag(
+                xml,
+                4,
+                "Data",
+                &base64::engine::general_purpose::STANDARD.encode(&icon.data),
+            );
+            xml.push_str("\t\t\t</Icon>\n");
+        }
+        xml.push_str("\t\t</CustomIcons>\n");
+    }
     write_tag(
         xml,
         2,
@@ -601,15 +675,30 @@ fn write_meta(
         "RecycleBinChanged",
         &format_timestamp(meta.recycle_bin_changed, bin_ts),
     );
-    write_tag(xml, 2, "EntryTemplatesGroup", &encode_uuid(Uuid::nil()));
+    write_tag(
+        xml,
+        2,
+        "EntryTemplatesGroup",
+        &encode_uuid(meta.entry_templates_group.unwrap_or(Uuid::nil())),
+    );
     write_tag(
         xml,
         2,
         "EntryTemplatesGroupChanged",
         &format_timestamp(meta.recycle_bin_changed, bin_ts),
     );
-    write_tag(xml, 2, "LastSelectedGroup", &encode_uuid(Uuid::nil()));
-    write_tag(xml, 2, "LastTopVisibleGroup", &encode_uuid(Uuid::nil()));
+    write_tag(
+        xml,
+        2,
+        "LastSelectedGroup",
+        &encode_uuid(meta.last_selected_group.unwrap_or(Uuid::nil())),
+    );
+    write_tag(
+        xml,
+        2,
+        "LastTopVisibleGroup",
+        &encode_uuid(meta.last_top_visible_group.unwrap_or(Uuid::nil())),
+    );
     write_tag(
         xml,
         2,
@@ -697,6 +786,10 @@ fn write_group(
         "LastTopVisibleEntry",
         &encode_uuid(Uuid::nil()),
     );
+    if let Some(prev) = group.previous_parent_group {
+        write_tag(xml, depth + 1, "PreviousParentGroup", &encode_uuid(prev));
+    }
+    write_custom_data_block(xml, depth + 1, &group.custom_data);
 
     for entry in &group.entries {
         write_entry(
@@ -828,6 +921,11 @@ fn write_entry(
             xml.push_str(&format!("{sub_indent}</Binary>\n"));
         }
     }
+
+    if let Some(qc) = entry.quality_check {
+        write_tag(xml, depth + 1, "QualityCheck", bool_str(qc));
+    }
+    write_custom_data_block(xml, depth + 1, &entry.custom_data);
 
     // <AutoType>
     let at_indent = "\t".repeat(depth + 1);
@@ -1156,6 +1254,83 @@ mod tests {
         assert!(parse_keepass_xml(bad_uuid, &mut none_stream(), &[]).is_err());
         let bad_time = "<KeePassFile><Root><Group><UUID/><Name>g</Name><Times><CreationTime>garbage!!</CreationTime></Times></Group></Root></KeePassFile>";
         assert!(parse_keepass_xml(bad_time, &mut none_stream(), &[]).is_err());
+    }
+
+    #[test]
+    fn kdbx41_fidelity_roundtrip() {
+        use crate::crypto::kdf::MasterCredentials;
+        use crate::model::{CustomIcon, Database, Entry, KdfConfig, Meta};
+
+        let mut db = Database::new("Fidelity");
+        db.meta.custom_icons.push(CustomIcon {
+            uuid: uuid::Uuid::from_u128(0xAAAA_1111),
+            data: b"PNGICON-bytes".to_vec(),
+        });
+        db.meta.entry_templates_group = Some(uuid::Uuid::from_u128(0xBB22));
+        db.meta.last_selected_group = Some(uuid::Uuid::from_u128(0xCC33));
+        db.meta.last_top_visible_group = Some(uuid::Uuid::from_u128(0xDD44));
+        db.meta
+            .custom_data
+            .insert("meta.key".into(), "meta.val".into());
+
+        let mut entry = Entry::new("KeePassXC-Browser");
+        entry.quality_check = Some(false);
+        entry
+            .custom_data
+            .insert("KeePassXC-Browser Settings".into(), "{\"id\":42}".into());
+        db.add_entry_at_path("Web/KeePassXC-Browser", entry)
+            .expect("add");
+
+        let group_id = db.resolve_group("Web").expect("grp").uuid;
+        db.root
+            .find_group_by_uuid_mut(group_id)
+            .expect("grp mut")
+            .previous_parent_group = Some(uuid::Uuid::from_u128(0xEE55));
+        db.root
+            .find_group_by_uuid_mut(group_id)
+            .expect("grp mut")
+            .custom_data
+            .insert("grp.key".into(), "grp.val".into());
+
+        db.kdf = KdfConfig::AesKdf {
+            rounds: 1_000,
+            seed: [4u8; 32],
+        };
+        let creds = MasterCredentials::with_password("pw");
+        let raw = db.to_kdbx_bytes(&creds).expect("encode");
+        let reopened = Database::from_kdbx_bytes(&raw, &creds).expect("decode");
+
+        let m: &Meta = &reopened.meta;
+        assert_eq!(m.custom_icons.len(), 1);
+        assert_eq!(m.custom_icons[0].uuid, uuid::Uuid::from_u128(0xAAAA_1111));
+        assert_eq!(m.custom_icons[0].data, b"PNGICON-bytes");
+        assert_eq!(m.entry_templates_group, Some(uuid::Uuid::from_u128(0xBB22)));
+        assert_eq!(m.last_selected_group, Some(uuid::Uuid::from_u128(0xCC33)));
+        assert_eq!(
+            m.last_top_visible_group,
+            Some(uuid::Uuid::from_u128(0xDD44))
+        );
+        assert_eq!(
+            m.custom_data.get("meta.key").map(String::as_str),
+            Some("meta.val")
+        );
+
+        let e = reopened
+            .resolve_entry("Web/KeePassXC-Browser")
+            .expect("entry");
+        assert_eq!(e.quality_check, Some(false));
+        assert_eq!(
+            e.custom_data
+                .get("KeePassXC-Browser Settings")
+                .map(String::as_str),
+            Some("{\"id\":42}")
+        );
+        let g = reopened.resolve_group("Web").expect("grp");
+        assert_eq!(g.previous_parent_group, Some(uuid::Uuid::from_u128(0xEE55)));
+        assert_eq!(
+            g.custom_data.get("grp.key").map(String::as_str),
+            Some("grp.val")
+        );
     }
 
     #[test]

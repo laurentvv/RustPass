@@ -425,6 +425,10 @@ pub struct Entry {
     pub tags: Vec<String>,
     /// Lifecycle timestamps.
     pub times: Times,
+    /// KDBX 4.1: opt-out of third-party quality checks (`<QualityCheck>`).
+    pub quality_check: Option<bool>,
+    /// KDBX 4.1 plugin/UI data (`<CustomData>`).
+    pub custom_data: HashMap<String, String>,
     /// Entry title (`Title`).
     pub title: String,
     /// Account username (`UserName`).
@@ -459,6 +463,8 @@ impl Entry {
             override_url: String::new(),
             tags: Vec::new(),
             times: Times::default(),
+            quality_check: None,
+            custom_data: HashMap::new(),
             title: title.into(),
             username: String::new(),
             password: ProtectedString::default(),
@@ -559,6 +565,10 @@ pub struct Group {
     pub enable_autotype: Option<bool>,
     /// Tri-state Search inclusion (`None` = null/inherit, `Some(true/false)`).
     pub enable_searching: Option<bool>,
+    /// KDBX 4.1: last parent before a drag-and-drop move (`<PreviousParentGroup>`).
+    pub previous_parent_group: Option<Uuid>,
+    /// KDBX 4.1 plugin/UI data (`<CustomData>`).
+    pub custom_data: HashMap<String, String>,
     /// Direct child entries.
     pub entries: Vec<Entry>,
     /// Child sub-groups.
@@ -579,6 +589,8 @@ impl Group {
             default_autotype_sequence: String::new(),
             enable_autotype: None,
             enable_searching: None,
+            previous_parent_group: None,
+            custom_data: HashMap::new(),
             entries: Vec::new(),
             children: Vec::new(),
         }
@@ -729,6 +741,23 @@ pub struct Meta {
     pub history_max_size: u64,
     /// Arbitrary key/value metadata (`<CustomData>`).
     pub custom_data: HashMap<String, String>,
+    /// Vault-wide custom icons (`<CustomIcons>`), referenced by entries/groups.
+    pub custom_icons: Vec<CustomIcon>,
+    /// Template-group reference (`<EntryTemplatesGroup>`), preserved on round-trip.
+    pub entry_templates_group: Option<Uuid>,
+    /// UI state: last selected group (`<LastSelectedGroup>`).
+    pub last_selected_group: Option<Uuid>,
+    /// UI state: last top visible group (`<LastTopVisibleGroup>`).
+    pub last_top_visible_group: Option<Uuid>,
+}
+
+/// A vault-wide custom icon (`<Meta><CustomIcons><Icon>`), Base64 PNG in the XML.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CustomIcon {
+    /// Icon identifier referenced by entries/groups.
+    pub uuid: Uuid,
+    /// Raw image bytes (PNG).
+    pub data: Vec<u8>,
 }
 
 impl Default for Meta {
@@ -756,6 +785,10 @@ impl Default for Meta {
             history_max_items: 10,
             history_max_size: 6_291_456,
             custom_data: HashMap::new(),
+            custom_icons: Vec::new(),
+            entry_templates_group: None,
+            last_selected_group: None,
+            last_top_visible_group: None,
         }
     }
 }
