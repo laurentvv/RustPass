@@ -62,6 +62,8 @@ pub struct VaultSession {
     pub show_inspector_qr: bool,
     pub inspector_qr_cache: Option<(String, TextureHandle)>,
     pub new_group_prompt: Option<String>,
+    /// `true` while the database is owned by a background save thread (db taken out).
+    pub saving: bool,
 }
 
 impl VaultSession {
@@ -83,6 +85,7 @@ impl VaultSession {
             show_inspector_qr: false,
             inspector_qr_cache: None,
             new_group_prompt: None,
+            saving: false,
         }
     }
 
@@ -124,6 +127,45 @@ enum WelcomeMode {
     #[default]
     UnlockExisting,
     CreateNew,
+}
+
+/// Wraps a create-new worker (`(Database, Result<MasterCredentials, String>)`) into the
+/// unified welcome handle shape, forwarding only the credentials on success.
+fn async_welcome_handle(
+    handle: std::thread::JoinHandle<(Database, Result<MasterCredentials, String>)>,
+) -> std::thread::JoinHandle<Result<(Database, MasterCredentials), String>> {
+    std::thread::spawn(move || match handle.join() {
+        Ok((db, Ok(creds))) => Ok((db, creds)),
+        Ok((_, Err(e))) => Err(e),
+        Err(_) => Err("Background create worker crashed".to_string()),
+    })
+}
+
+/// Vault crypto operations running on a worker thread (Argon2 blocks for 0.5-2 s at
+/// production parameters; running it on the UI thread froze every frame including the
+/// TOTP countdown and the clipboard-clear timer). Results are polled each frame.
+enum BackgroundVaultOp {
+    /// Welcome-screen open or create; result completes as a new session.
+    Welcome {
+        path: PathBuf,
+        handle: std::thread::JoinHandle<Result<(Database, MasterCredentials), String>>,
+    },
+    /// Locked-tab unlock for the tab at `tab`.
+    UnlockTab {
+        tab: usize,
+        handle: std::thread::JoinHandle<Result<(Database, MasterCredentials), String>>,
+    },
+    /// Owned database taken out of the session while the thread encrypts it.
+    Save {
+        tab: usize,
+        dest: PathBuf,
+        handle: std::thread::JoinHandle<(Database, Result<(), String>)>,
+    },
+    /// Open of the merge source; the merge itself runs on the UI thread (cheap model work).
+    MergeFrom {
+        src_path: PathBuf,
+        handle: std::thread::JoinHandle<Result<Database, String>>,
+    },
 }
 
 /// A vault mutation requested from a panel closure, applied once borrows release.
@@ -191,6 +233,7 @@ pub struct RustPassApp {
     group_rename_buf: String,
     pending_group_delete: Option<uuid::Uuid>,
     pending_empty_trash: bool,
+    bg_op: Option<BackgroundVaultOp>,
 }
 
 impl RustPassApp {
@@ -236,6 +279,7 @@ impl RustPassApp {
             group_rename_buf: String::new(),
             pending_group_delete: None,
             pending_empty_trash: false,
+            bg_op: None,
         };
 
         if let Some(kf) = cli_args.keyfile {
@@ -337,6 +381,7 @@ impl RustPassApp {
             group_rename_buf: String::new(),
             pending_group_delete: None,
             pending_empty_trash: false,
+            bg_op: None,
         };
 
         if let Some(kf) = cli_args.keyfile {
@@ -385,9 +430,26 @@ impl RustPassApp {
         if value.is_empty() {
             return;
         }
-        if let Ok(mut cb) = arboard::Clipboard::new()
-            && cb.set_text(value).is_ok()
-        {
+        // Secrets must not linger in Win+V history or cloud sync: the Windows
+        // clipboard write is flagged as excluded from history and monitoring.
+        let posted = if let Ok(mut cb) = arboard::Clipboard::new() {
+            #[cfg(windows)]
+            {
+                use arboard::SetExtWindows as _;
+                cb.set()
+                    .exclude_from_history()
+                    .exclude_from_monitoring()
+                    .text(value)
+                    .is_ok()
+            }
+            #[cfg(not(windows))]
+            {
+                cb.set().text(value).is_ok()
+            }
+        } else {
+            false
+        };
+        if posted {
             let secs = self.settings.clipboard_clear_seconds;
             if secs > 0 {
                 self.clipboard_guard = Some(PendingClipboardClear {
@@ -398,6 +460,114 @@ impl RustPassApp {
             } else {
                 self.status_message = format!("Copied {label} to clipboard");
             }
+        }
+    }
+
+    /// Applies finished background vault operations; keeps a 60 ms repaint heartbeat
+    /// while one is pending. Cheap when idle (single `is_finished` check).
+    fn poll_background_op(&mut self, ctx: &egui::Context) {
+        let Some(op) = self.bg_op.as_ref() else {
+            return;
+        };
+        let finished = match op {
+            BackgroundVaultOp::Welcome { handle, .. } => handle.is_finished(),
+            BackgroundVaultOp::UnlockTab { handle, .. } => handle.is_finished(),
+            BackgroundVaultOp::Save { handle, .. } => handle.is_finished(),
+            BackgroundVaultOp::MergeFrom { handle, .. } => handle.is_finished(),
+        };
+        if !finished {
+            ctx.request_repaint_after(Duration::from_millis(60));
+            return;
+        }
+        match self.bg_op.take().expect("checked above") {
+            BackgroundVaultOp::Welcome { path, handle } => match handle.join() {
+                Ok(Ok((db, creds))) => {
+                    self.welcome_pw.zeroize();
+                    self.welcome_pw_confirm.zeroize();
+                    self.settings.record_recent(path.clone());
+                    self.sessions
+                        .push(VaultSession::from_unlocked(Some(path), creds, db));
+                    self.active_tab = self.sessions.len() - 1;
+                    self.status_message = "Vault opened".to_string();
+                }
+                Ok(Err(e)) => {
+                    self.welcome_error = Some(e);
+                }
+                Err(_) => {
+                    self.welcome_error = Some("Background open worker crashed".to_string());
+                }
+            },
+            BackgroundVaultOp::UnlockTab { tab, handle } => match handle.join() {
+                Ok(Ok((db, creds))) => {
+                    if let Some(sess) = self.sessions.get_mut(tab) {
+                        sess.unlock_pw_buf.zeroize();
+                        sess.unlock_error = None;
+                        sess.credentials = creds;
+                        sess.db = Some(db);
+                        self.status_message = "Vault unlocked".to_string();
+                    }
+                }
+                Ok(Err(e)) => {
+                    if let Some(sess) = self.sessions.get_mut(tab) {
+                        sess.unlock_pw_buf.zeroize();
+                        sess.unlock_error = Some(e);
+                    }
+                }
+                Err(_) => {
+                    if let Some(sess) = self.sessions.get_mut(tab) {
+                        sess.unlock_error = Some("Background unlock worker crashed".to_string());
+                    }
+                }
+            },
+            BackgroundVaultOp::Save { tab, dest, handle } => {
+                if let Some(sess) = self.sessions.get_mut(tab) {
+                    let (db, res) = handle.join().unwrap_or_else(|_| {
+                        (
+                            Database::new("Recovered"),
+                            Err("Background save worker crashed".to_string()),
+                        )
+                    });
+                    sess.saving = false;
+                    sess.db = Some(db);
+                    match res {
+                        Ok(()) => {
+                            sess.path = Some(dest.clone());
+                            sess.dirty = false;
+                            self.settings.record_recent(dest.clone());
+                            self.status_message = format!("Saved vault to {}", dest.display());
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Save failed: {e}");
+                        }
+                    }
+                }
+            }
+            BackgroundVaultOp::MergeFrom { src_path, handle } => match handle.join() {
+                Ok(Ok(src_db)) => {
+                    if let Some(sess) = self.active_session_mut()
+                        && let Some(ref mut dst_db) = sess.db
+                    {
+                        let rep = dst_db.merge_from(&src_db, false);
+                        sess.dirty = true;
+                        self.status_message = format!(
+                            "Merged +{} added, ~{} updated",
+                            rep.entries_added.len(),
+                            rep.entries_updated.len()
+                        );
+                    } else {
+                        self.status_message = "Merge finished but no vault is open".to_string();
+                    }
+                }
+                Ok(Err(e)) => {
+                    self.status_message = format!(
+                        "Merge failed for {}: {e} (different master password?)",
+                        src_path.display()
+                    );
+                }
+                Err(_) => {
+                    self.status_message = "Background merge worker crashed".to_string();
+                }
+            },
         }
     }
 
@@ -484,10 +654,15 @@ impl RustPassApp {
     }
 
     fn save_active_vault(&mut self, save_as: bool) {
-        let Some(sess) = self.sessions.get_mut(self.active_tab) else {
+        if self.bg_op.is_some() {
+            self.status_message = "Another vault operation is already running".to_string();
+            return;
+        }
+        let tab = self.active_tab;
+        let Some(sess) = self.sessions.get_mut(tab) else {
             return;
         };
-        if sess.db.is_none() {
+        if sess.db.is_none() || sess.saving {
             return;
         }
 
@@ -504,26 +679,30 @@ impl RustPassApp {
             return;
         };
 
-        if let Some(ref mut db) = sess.db {
-            match db.save_atomic(&path, &sess.credentials) {
-                Ok(()) => {
-                    sess.path = Some(path.clone());
-                    sess.dirty = false;
-                    self.settings.record_recent(path.clone());
-                    self.status_message = format!("Saved vault to {}", path.display());
-                }
-                Err(e) => {
-                    self.status_message = format!("Save failed: {e}");
-                }
-            }
-        }
+        // The Argon2 derivation dominates the save: hand the owned Database to a
+        // worker thread and poll the result (session shows a busy panel meanwhile).
+        let mut db = std::mem::take(&mut sess.db).expect("checked is_some above");
+        sess.saving = true;
+        let creds = sess.credentials.clone();
+        let status = texts(self.settings.language).busy_saving.to_string();
+        let dest = path.clone();
+        let handle = std::thread::spawn(move || {
+            let res = db.save_atomic(&dest, &creds).map_err(|e| e.to_string());
+            (db, res)
+        });
+        self.bg_op = Some(BackgroundVaultOp::Save {
+            tab,
+            dest: path,
+            handle,
+        });
+        self.status_message = status;
     }
 
     /// Requests a close action, routing through the unsaved-changes confirmation
     /// when any session is dirty.
     fn request_close(&mut self, close: PendingClose) {
         self.pending_close = Some(close);
-        if !self.sessions.iter().any(|s| s.dirty) {
+        if !self.sessions.iter().any(|s| s.dirty && !s.saving) {
             let quit = self.execute_pending_close();
             if quit {
                 self.close_viewport_requested = true;
@@ -535,8 +714,8 @@ impl RustPassApp {
     fn save_all_dirty(&mut self) -> usize {
         let mut failed = 0usize;
         for sess in &mut self.sessions {
-            if !sess.dirty {
-                continue;
+            if !sess.dirty || sess.saving {
+                continue; // in-flight background save already committed to disk
             }
             let Some(path) = sess.path.clone() else {
                 failed += 1;
@@ -584,11 +763,15 @@ impl RustPassApp {
             return;
         }
         let t = texts(self.settings.language);
-        let dirty_count = self.sessions.iter().filter(|s| s.dirty).count();
+        let dirty_count = self
+            .sessions
+            .iter()
+            .filter(|s| s.dirty && !s.saving)
+            .count();
         let unsavable = self
             .sessions
             .iter()
-            .filter(|s| s.dirty && s.path.is_none())
+            .filter(|s| s.dirty && !s.saving && s.path.is_none())
             .count();
         let palette = self.palette;
         egui::Window::new(t.unsaved_changes_title)
@@ -774,6 +957,7 @@ impl RustPassApp {
                     credentials: MasterCredentials::default(),
                     db: None,
                     dirty: false,
+                    saving: false,
                     unlock_pw_buf: String::new(),
                     unlock_error: None,
                     sidebar_filter: SidebarFilter::AllEntries,
@@ -885,13 +1069,37 @@ impl RustPassApp {
                 }
             }
             PaletteAction::CopyTotp => {
-                let code_res = self
+                let looked = self
                     .active_session()
                     .and_then(|s| s.db.as_ref().zip(s.selected_entry))
-                    .and_then(|(db, id)| db.root.find_entry_by_uuid(id))
-                    .map(|e| TotpConfig::from_entry(e).and_then(|c| c.generate_now()));
-                match code_res {
-                    Some(Ok((code, _))) => self.copy_with_auto_clear("TOTP code", &code),
+                    .map(|(db, id)| {
+                        db.root
+                            .find_entry_by_uuid(id)
+                            .ok_or_else(|| {
+                                crate::error::RustPassError::EntryNotFound(id.to_string())
+                            })
+                            .and_then(|e| TotpConfig::from_entry(e).map(|c| (id, c)))
+                    });
+                match looked {
+                    Some(Ok((id, cfg))) => match cfg.current_code() {
+                        Ok(code) => {
+                            self.copy_with_auto_clear("TOTP code", &code);
+                            if cfg.is_hotp()
+                                && let Some(sess) = self.active_session_mut()
+                                && let Some(ref mut db) = sess.db
+                                && let Some(entry) = db.root.find_entry_by_uuid_mut(id)
+                                && let Ok(next_uri) = cfg.next_hotp_uri()
+                            {
+                                // Google Authenticator semantics: the counter advances
+                                // after a code is used, otherwise the next code repeats.
+                                entry.otp = Some(ProtectedString::new(next_uri));
+                                entry.times.touch_modified();
+                                sess.dirty = true;
+                                self.status_message = "HOTP counter incremented".to_string();
+                            }
+                        }
+                        Err(e) => self.status_message = e.to_string(),
+                    },
                     Some(Err(e)) => self.status_message = e.to_string(),
                     None => {}
                 }
@@ -1068,6 +1276,17 @@ impl RustPassApp {
 
         if self.sessions.is_empty() {
             self.render_welcome_screen(ui, &ctx);
+        } else if self.sessions.get(self.active_tab).is_some_and(|s| s.saving) {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.spinner();
+                        ui.add_space(10.0);
+                        ui.weak(&self.status_message);
+                    });
+                });
+            });
         } else if self
             .sessions
             .get(self.active_tab)
@@ -1149,6 +1368,7 @@ impl RustPassApp {
 
 impl eframe::App for RustPassApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_background_op(ctx);
         self.poll_clipboard_and_autolock(ctx);
         self.handle_shortcuts(ctx);
 
@@ -1242,29 +1462,24 @@ impl RustPassApp {
                         let picked = rfd::FileDialog::new()
                             .add_filter("KeePass Vault", &["kdbx"])
                             .pick_file();
-                        if let Some(src_path) = picked.as_ref()
+                        if self.bg_op.is_some() {
+                            self.status_message =
+                                "Another vault operation is already running".to_string();
+                        } else if let Some(src_path) = picked.as_ref()
                             && let Some(sess) = self.active_session_mut()
                             && sess.db.is_some()
                         {
-                            if let Some(ref mut dst_db) = sess.db {
-                                match Database::open(src_path, &sess.credentials) {
-                                    Ok(src_db) => {
-                                        let rep = dst_db.merge_from(&src_db, false);
-                                        sess.dirty = true;
-                                        self.status_message = format!(
-                                            "Merged +{} added, ~{} updated",
-                                            rep.entries_added.len(),
-                                            rep.entries_updated.len()
-                                        );
-                                    }
-                                    Err(e) => {
-                                        self.status_message = format!(
-                                            "Merge failed for {}: {e} (different master password?)",
-                                            src_path.display()
-                                        )
-                                    }
-                                }
-                            }
+                            let creds = sess.credentials.clone();
+                            let src = src_path.clone();
+                            let t = texts(self.settings.language);
+                            let handle = std::thread::spawn(move || {
+                                Database::open(&src, &creds).map_err(|e| e.to_string())
+                            });
+                            self.bg_op = Some(BackgroundVaultOp::MergeFrom {
+                                src_path: src_path.clone(),
+                                handle,
+                            });
+                            self.status_message = t.busy_merging.to_string();
                         } else if picked.is_some() {
                             self.status_message = "Merge cancelled: no unlocked vault".to_string();
                         }
@@ -1769,16 +1984,20 @@ impl RustPassApp {
                             WelcomeMode::UnlockExisting => t.unlock_button,
                             WelcomeMode::CreateNew => t.create_button,
                         };
+                        let busy = self.bg_op.is_some();
                         if ui
-                            .button(
-                                RichText::new(btn_label)
-                                    .size(15.0)
-                                    .strong()
-                                    .color(palette.accent),
+                            .add_enabled(
+                                !busy,
+                                egui::Button::new(
+                                    RichText::new(btn_label)
+                                        .size(15.0)
+                                        .strong()
+                                        .color(palette.accent),
+                                ),
                             )
                             .clicked()
                         {
-                            self.submit_welcome_form();
+                            self.start_welcome_op();
                         }
                     });
 
@@ -1821,6 +2040,76 @@ impl RustPassApp {
                     });
             });
         });
+    }
+
+    /// Async UI path: validates the welcome form and spawns the Argon2/open work on
+    /// a worker thread; the result lands as a session once [`Self::poll_background_op`]
+    /// sees the handle finish. [`Self::submit_welcome_form`] stays synchronous for tests.
+    fn start_welcome_op(&mut self) {
+        if self.bg_op.is_some() {
+            return;
+        }
+        self.welcome_error = None;
+        let db_path_str = self.welcome_db_path.trim();
+        if db_path_str.is_empty() {
+            self.welcome_error = Some("Please select or enter a .kdbx file path.".to_string());
+            return;
+        }
+        let db_path = PathBuf::from(db_path_str);
+        let kf_opt = if self.welcome_keyfile_path.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(self.welcome_keyfile_path.trim()))
+        };
+        let pw_opt = if self.welcome_pw.is_empty() && kf_opt.is_some() {
+            None
+        } else {
+            Some(self.welcome_pw.clone())
+        };
+        let t = texts(self.settings.language);
+
+        match self.welcome_mode {
+            WelcomeMode::UnlockExisting => {
+                let thread_path = db_path.clone();
+                let handle = std::thread::spawn(move || {
+                    MasterCredentials::new(pw_opt, kf_opt.as_deref())
+                        .and_then(|creds| {
+                            Database::open(&thread_path, &creds).map(|db| (db, creds))
+                        })
+                        .map_err(|e| e.to_string())
+                });
+                self.bg_op = Some(BackgroundVaultOp::Welcome {
+                    path: db_path,
+                    handle,
+                });
+                self.welcome_pw.zeroize();
+                self.status_message = t.busy_opening.to_string();
+            }
+            WelcomeMode::CreateNew => {
+                if self.welcome_pw != self.welcome_pw_confirm {
+                    self.welcome_error = Some(t.wl_pw_mismatch.to_string());
+                    return;
+                }
+                let mut db = Database::new(self.welcome_vault_name.trim());
+                for folder in ["General", "Internet", "Infrastructure", "Finance"] {
+                    let _ = db.mkdir_p(folder);
+                }
+                let thread_path = db_path.clone();
+                let handle = std::thread::spawn(move || {
+                    let res = MasterCredentials::new(pw_opt, kf_opt.as_deref())
+                        .and_then(|creds| db.save_atomic(&thread_path, &creds).map(|()| creds))
+                        .map_err(|e| e.to_string());
+                    (db, res)
+                });
+                self.bg_op = Some(BackgroundVaultOp::Welcome {
+                    path: db_path,
+                    handle: async_welcome_handle(handle),
+                });
+                self.welcome_pw.zeroize();
+                self.welcome_pw_confirm.zeroize();
+                self.status_message = t.busy_creating.to_string();
+            }
+        }
     }
 
     fn submit_welcome_form(&mut self) {
@@ -1937,19 +2226,19 @@ impl RustPassApp {
                     } else {
                         Some(sess.unlock_pw_buf.clone())
                     };
-                    match MasterCredentials::new(pw_opt, sess.credentials.keyfile_path.as_deref())
-                        .and_then(|c| Database::open(p, &c).map(|db| (db, c)))
-                    {
-                        Ok((db, creds)) => {
-                            sess.unlock_pw_buf.zeroize();
-                            sess.unlock_error = None;
-                            sess.credentials = creds;
-                            sess.db = Some(db);
-                        }
-                        Err(e) => {
-                            sess.unlock_error = Some(e.to_string());
-                        }
-                    }
+                    sess.unlock_pw_buf.zeroize();
+                    sess.unlock_error = None;
+                    let tab = self.active_tab;
+                    let path = p.clone();
+                    let keyfile = sess.credentials.keyfile_path.clone();
+                    let t = texts(self.settings.language);
+                    let handle = std::thread::spawn(move || {
+                        MasterCredentials::new(pw_opt, keyfile.as_deref())
+                            .and_then(|c| Database::open(&path, &c).map(|db| (db, c)))
+                            .map_err(|e| e.to_string())
+                    });
+                    self.bg_op = Some(BackgroundVaultOp::UnlockTab { tab, handle });
+                    self.status_message = t.busy_opening.to_string();
                 }
 
                 if let Some(ref err) = sess.unlock_error {
@@ -3163,6 +3452,58 @@ mod tests {
         // Simulate frame render 6: Welcome Screen
         app.sessions.clear();
         render_pass(&mut app);
+    }
+
+    #[test]
+    fn test_gui_background_open_completes_via_polling() {
+        let ctx = egui::Context::default();
+        let db_file = temp_test_file("bg_open_test.kdbx");
+
+        let mut app = RustPassApp::new_for_test(&ctx, GuiCliArgs::default());
+        app.welcome_mode = WelcomeMode::CreateNew;
+        app.welcome_vault_name = "BG Vault".to_string();
+        app.welcome_db_path = db_file.display().to_string();
+        app.welcome_pw = "BgMaster#2026!".to_string();
+        app.welcome_pw_confirm = "BgMaster#2026!".to_string();
+
+        // Async path used by the UI: spawn, then simulate frames until done.
+        app.start_welcome_op();
+        assert!(app.bg_op.is_some(), "op must be in flight");
+        assert!(app.sessions.is_empty(), "no session before completion");
+
+        let mut spins = 0;
+        while app.bg_op.is_some() && spins < 600 {
+            spins += 1;
+            app.poll_background_op(&ctx);
+            if app.bg_op.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        assert!(app.bg_op.is_none(), "op must settle");
+        assert_eq!(app.sessions.len(), 1, "session lands after the op");
+        assert!(app.active_session().unwrap().db.is_some());
+        // The poll loop requested repaints while pending (no assertion needed; the
+        // headless context absorbs them).
+
+        // Async save path: take the db out, spawn, poll until restored.
+        app.active_session_mut().unwrap().dirty = true;
+        app.save_active_vault(false);
+        assert!(app.active_session().unwrap().saving, "saving flag set");
+        assert!(app.active_session().unwrap().db.is_none(), "db in flight");
+        spins = 0;
+        while app.bg_op.is_some() && spins < 600 {
+            spins += 1;
+            app.poll_background_op(&ctx);
+            if app.bg_op.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let sess = app.active_session().unwrap();
+        assert!(sess.db.is_some(), "db restored after save");
+        assert!(!sess.saving);
+        assert!(!sess.dirty, "save marks clean");
+
+        let _ = std::fs::remove_file(&db_file);
     }
 
     #[test]

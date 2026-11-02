@@ -80,10 +80,8 @@ fn main() -> ExitCode {
              unencrypted credentials over this pipe; testing only"
         );
     }
-    let session = BrowserSession {
-        db: open_db.as_ref(),
-        allow_plaintext_logins,
-    };
+    let mut session = BrowserSession::new(open_db.as_ref());
+    session.allow_plaintext_logins = allow_plaintext_logins;
 
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -100,7 +98,7 @@ fn main() -> ExitCode {
     loop {
         match read_native_message(&mut reader) {
             Ok(Some(msg)) => {
-                let response = handle_browser_message(&msg, &session);
+                let response = handle_browser_message(&msg, &mut session);
                 if let Err(e) = write_native_message(&mut writer, &response) {
                     eprintln!("rustpass-proxy write error: {e}");
                     return ExitCode::FAILURE;

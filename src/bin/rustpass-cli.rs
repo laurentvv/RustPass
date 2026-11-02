@@ -13,6 +13,7 @@ use rustpass::model::{
 };
 use rustpass::search::search_database;
 use rustpass::totp::TotpConfig;
+use rustpass::totp::migration as otp_migration;
 use std::io::{BufRead, BufReader, IsTerminal, Stdin, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -546,6 +547,69 @@ fn run(command: CliCommand) -> Result<()> {
             let (db, _) = prompts.unlock_vault(&open, &database)?;
             for (path, _) in search_database(&db, &term, false) {
                 println!("{path}");
+            }
+            Ok(())
+        }
+
+        CliCommand::OtpImport {
+            open,
+            src,
+            group,
+            database,
+        } => {
+            let (mut db, creds) = prompts.unlock_vault(&open, &database)?;
+            let uri = if src.trim().starts_with("otpauth-migration://") {
+                src.clone()
+            } else {
+                std::fs::read_to_string(&src)
+                    .map_err(|e| RustPassError::from(e).with_context(format!("reading {}", src)))?
+                    .trim()
+                    .to_string()
+            };
+            let payload = otp_migration::parse_migration_uri(&uri)?;
+            if payload.entries.is_empty() {
+                return Err(RustPassError::InvalidArgument(
+                    "Migration payload contains no OTP entries".to_string(),
+                ));
+            }
+            let _ = db.mkdir_p(&group);
+            let mut imported = 0usize;
+            let mut skipped = 0usize;
+            for otp in &payload.entries {
+                let cfg = otp.to_totp_config();
+                let title = if cfg.issuer.is_empty() {
+                    if otp.name.is_empty() {
+                        "Imported OTP".to_string()
+                    } else {
+                        otp.name.clone()
+                    }
+                } else {
+                    cfg.issuer.clone()
+                };
+                let mut entry = Entry::new(title);
+                entry.username = cfg.account.clone();
+                entry.notes = format!(
+                    "Imported from Google Authenticator ({}{})",
+                    if otp.hotp { "HOTP" } else { "TOTP" },
+                    if otp.hotp {
+                        format!(", counter {}", otp.counter.unwrap_or(0))
+                    } else {
+                        String::new()
+                    }
+                );
+                entry.otp = Some(ProtectedString::new(cfg.to_otpauth_uri()));
+                entry.tags.push("otp-import".to_string());
+                match db.add_entry_at_path(&format!("{group}/{}", entry.title), entry) {
+                    Ok(_) => imported += 1,
+                    Err(_) => skipped += 1, // duplicate title inside the group
+                }
+            }
+            db.save_atomic(&database, &creds)?;
+            if !open.quiet {
+                println!(
+                    "Imported {imported} OTP entries into group '{group}' ({} skipped as duplicates)",
+                    skipped
+                );
             }
             Ok(())
         }

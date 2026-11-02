@@ -203,6 +203,10 @@ pub struct Texts {
     pub ins_in_trash: &'static str,
     pub audit_export_csv: &'static str,
     pub audit_export_html: &'static str,
+    pub busy_opening: &'static str,
+    pub busy_creating: &'static str,
+    pub busy_saving: &'static str,
+    pub busy_merging: &'static str,
 }
 
 const EN: Texts = Texts {
@@ -384,6 +388,10 @@ const EN: Texts = Texts {
     ins_in_trash: "This entry is in the Recycle Bin.",
     audit_export_csv: "Export CSV…",
     audit_export_html: "Export HTML…",
+    busy_opening: "Opening vault — deriving key (Argon2)…",
+    busy_creating: "Creating vault — deriving key (Argon2)…",
+    busy_saving: "Saving vault — deriving key (Argon2)…",
+    busy_merging: "Opening source vault for merge — deriving key…",
 };
 
 const FR: Texts = Texts {
@@ -565,6 +573,10 @@ const FR: Texts = Texts {
     ins_in_trash: "Cette entrée est dans la corbeille.",
     audit_export_csv: "Exporter CSV…",
     audit_export_html: "Exporter HTML…",
+    busy_opening: "Ouverture du coffre — dérivation de la clé (Argon2)…",
+    busy_creating: "Création du coffre — dérivation de la clé (Argon2)…",
+    busy_saving: "Enregistrement du coffre — dérivation de la clé (Argon2)…",
+    busy_merging: "Ouverture du coffre source pour fusion — dérivation de la clé…",
 };
 
 /// Substitutes `{}` placeholders in a translated template with `args`, in order.
