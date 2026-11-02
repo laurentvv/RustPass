@@ -178,6 +178,21 @@ pub enum CliCommand {
         entry: String,
     },
 
+    /// Import OTP entries from a Google Authenticator export URI or file.
+    #[command(name = "otp-import")]
+    OtpImport {
+        #[command(flatten)]
+        open: VaultOpenArgs,
+        /// `otpauth-migration://...` URI, or a path to a text file holding it.
+        #[arg(short = 's', long = "src")]
+        src: String,
+        /// Target group for the imported entries (created when missing).
+        #[arg(short = 'g', long = "group", default_value = "Google Authenticator")]
+        group: String,
+        /// Path to the `.kdbx` database.
+        database: PathBuf,
+    },
+
     /// Analyze password health and weaknesses across a database.
     #[command(name = "analyze")]
     Analyze {

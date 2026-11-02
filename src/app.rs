@@ -1069,13 +1069,37 @@ impl RustPassApp {
                 }
             }
             PaletteAction::CopyTotp => {
-                let code_res = self
+                let looked = self
                     .active_session()
                     .and_then(|s| s.db.as_ref().zip(s.selected_entry))
-                    .and_then(|(db, id)| db.root.find_entry_by_uuid(id))
-                    .map(|e| TotpConfig::from_entry(e).and_then(|c| c.generate_now()));
-                match code_res {
-                    Some(Ok((code, _))) => self.copy_with_auto_clear("TOTP code", &code),
+                    .map(|(db, id)| {
+                        db.root
+                            .find_entry_by_uuid(id)
+                            .ok_or_else(|| {
+                                crate::error::RustPassError::EntryNotFound(id.to_string())
+                            })
+                            .and_then(|e| TotpConfig::from_entry(e).map(|c| (id, c)))
+                    });
+                match looked {
+                    Some(Ok((id, cfg))) => match cfg.current_code() {
+                        Ok(code) => {
+                            self.copy_with_auto_clear("TOTP code", &code);
+                            if cfg.is_hotp()
+                                && let Some(sess) = self.active_session_mut()
+                                && let Some(ref mut db) = sess.db
+                                && let Some(entry) = db.root.find_entry_by_uuid_mut(id)
+                                && let Ok(next_uri) = cfg.next_hotp_uri()
+                            {
+                                // Google Authenticator semantics: the counter advances
+                                // after a code is used, otherwise the next code repeats.
+                                entry.otp = Some(ProtectedString::new(next_uri));
+                                entry.times.touch_modified();
+                                sess.dirty = true;
+                                self.status_message = "HOTP counter incremented".to_string();
+                            }
+                        }
+                        Err(e) => self.status_message = e.to_string(),
+                    },
                     Some(Err(e)) => self.status_message = e.to_string(),
                     None => {}
                 }

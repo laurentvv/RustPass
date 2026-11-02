@@ -68,6 +68,8 @@ pub struct TotpConfig {
     pub period: u64,
     /// Whether Steam Guard 26-symbol encoding is active.
     pub steam: bool,
+    /// HOTP counter (`Some` = counter-based HOTP URI, `None` = time-based TOTP).
+    pub counter: Option<u64>,
 }
 
 impl TotpConfig {
@@ -95,6 +97,7 @@ impl TotpConfig {
             digits: 6,
             period: 30,
             steam: false,
+            counter: None,
         })
     }
 
@@ -108,18 +111,12 @@ impl TotpConfig {
             .split_once('/')
             .unwrap_or((kind_and_label, ""));
         let kind_lower = kind.to_ascii_lowercase();
-        if kind_lower == "hotp" {
-            // HOTP is counter-based: generating from the wall clock would produce
-            // valid-looking codes that never work. Refuse loudly instead.
-            return Err(RustPassError::UnsupportedFeature(
-                "HOTP (counter-based) otpauth URIs are not supported; use a TOTP URI".to_string(),
-            ));
-        }
-        if kind_lower != "totp" && kind_lower != "steam" {
+        if kind_lower != "totp" && kind_lower != "steam" && kind_lower != "hotp" {
             return Err(RustPassError::Totp(format!(
                 "Unsupported otpauth scheme type: {kind}"
             )));
         }
+        let is_hotp = kind_lower == "hotp";
 
         let decoded_label = urlencoding::decode(raw_label)
             .map(std::borrow::Cow::into_owned)
@@ -134,6 +131,7 @@ impl TotpConfig {
         let mut steam = kind_lower == "steam";
         let mut digits: u8 = if steam { 5 } else { 6 };
         let mut period: u64 = 30;
+        let mut counter: Option<u64> = if is_hotp { Some(0) } else { None };
 
         for pair in query.split('&').filter(|s| !s.is_empty()) {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
@@ -170,6 +168,12 @@ impl TotpConfig {
                 "encoder" if val.eq_ignore_ascii_case("steam") => {
                     steam = true;
                 }
+                "counter" if is_hotp => {
+                    let parsed = val.trim().parse::<u64>().map_err(|_| {
+                        RustPassError::Totp(format!("Invalid HOTP counter parameter: {val}"))
+                    })?;
+                    counter = Some(parsed);
+                }
                 _ => {}
             }
         }
@@ -196,6 +200,7 @@ impl TotpConfig {
             digits,
             period,
             steam,
+            counter,
         })
     }
 
@@ -244,6 +249,7 @@ impl TotpConfig {
                 digits,
                 period,
                 steam,
+                counter: None,
             });
         }
 
@@ -269,12 +275,18 @@ impl TotpConfig {
         };
 
         let mut params = format!(
-            "secret={}&period={}&digits={}&algorithm={}",
+            "secret={}&digits={}&algorithm={}",
             self.secret_base32.as_str(),
-            self.period,
             if self.steam { 5 } else { self.digits },
             self.algorithm.as_str()
         );
+        if self.is_hotp() {
+            params.push_str("&counter=");
+            params.push_str(&self.counter.unwrap_or(0).to_string());
+        } else {
+            params.push_str("&period=");
+            params.push_str(&self.period.to_string());
+        }
         if !self.issuer.is_empty() {
             params.push_str("&issuer=");
             params.push_str(&urlencoding::encode(&self.issuer));
@@ -282,7 +294,8 @@ impl TotpConfig {
         if self.steam {
             params.push_str("&encoder=steam");
         }
-        format!("otpauth://totp/{label}?{params}")
+        let scheme = if self.is_hotp() { "hotp" } else { "totp" };
+        format!("otpauth://{scheme}/{label}?{params}")
     }
 
     /// Decodes the Base32 shared secret into raw key bytes.
@@ -291,9 +304,41 @@ impl TotpConfig {
     }
 
     /// Generates the current TOTP token and remaining validity seconds at `Utc::now()`.
+    /// For HOTP configs the current stored counter is used (no time component).
     pub fn generate_now(&self) -> Result<(String, u64)> {
+        if let Some(ctr) = self.counter {
+            return Ok((self.generate_hotp(ctr)?, 0));
+        }
         let now_secs = u64::try_from(chrono::Utc::now().timestamp().max(0)).unwrap_or(0);
         self.generate_at(now_secs)
+    }
+
+    /// `true` when this config is counter-based (HOTP).
+    #[must_use]
+    pub fn is_hotp(&self) -> bool {
+        self.counter.is_some()
+    }
+
+    /// Generates the RFC 4226 code at an explicit HOTP counter.
+    pub fn generate_hotp(&self, counter: u64) -> Result<String> {
+        let key = self.secret_bytes()?;
+        compute_hotp(&key, counter, self.algorithm, self.digits, self.steam)
+    }
+
+    /// The code the user sees right now (HOTP uses the stored counter, TOTP the clock).
+    pub fn current_code(&self) -> Result<String> {
+        Ok(self.generate_now()?.0)
+    }
+
+    /// The `otpauth://hotp/` URI advanced to `counter + 1` (Google Authenticator
+    /// semantics: the counter increments after every displayed/used code).
+    pub fn next_hotp_uri(&self) -> Result<String> {
+        let ctr = self
+            .counter
+            .ok_or_else(|| RustPassError::Totp("Not a HOTP configuration".to_string()))?;
+        let mut advanced = self.clone();
+        advanced.counter = Some(ctr.saturating_add(1));
+        Ok(advanced.to_otpauth_uri())
     }
 
     /// Generates the TOTP token and remaining validity seconds at `unix_seconds`.
@@ -331,6 +376,8 @@ fn decode_base32_secret(normalized_upper: &str) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 /// Computes an RFC 4226 / RFC 6238 dynamic truncation code for `counter`.
+pub mod migration;
+
 pub fn compute_hotp(
     secret: &[u8],
     counter: u64,
@@ -446,12 +493,56 @@ mod hotp_tests {
     use super::*;
 
     #[test]
-    fn hotp_uris_rejected_with_clear_error() {
-        let err = TotpConfig::parse("otpauth://hotp/alice?secret=JBSWY3DPEHPK3PXP&counter=1")
-            .expect_err("HOTP must be rejected");
-        assert!(
-            matches!(err, crate::error::RustPassError::UnsupportedFeature(ref m) if m.contains("HOTP")),
-            "unexpected error: {err:?}"
-        );
+    fn hotp_uris_parse_with_counter() {
+        // HOTP is fully supported since the migration import landed; the URI must
+        // parse and keep its counter (generation pinned by the RFC 4226 vectors).
+        let cfg = TotpConfig::parse("otpauth://hotp/alice?secret=JBSWY3DPEHPK3PXP&counter=1")
+            .expect("HOTP URIs are supported");
+        assert!(cfg.is_hotp());
+        assert_eq!(cfg.counter, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod hotp_vectors_tests {
+    use super::*;
+
+    /// RFC 4226 Appendix D reference secret (ASCII "12345678901234567890").
+    const RFC4226_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    fn hotp_cfg(counter: u64) -> TotpConfig {
+        TotpConfig {
+            issuer: "RFC".to_string(),
+            account: "test".to_string(),
+            secret_base32: ProtectedString::new(RFC4226_SECRET),
+            algorithm: OtpAlgorithm::Sha1,
+            digits: 6,
+            period: 30,
+            steam: false,
+            counter: Some(counter),
+        }
+    }
+
+    #[test]
+    fn rfc4226_appendix_d_vectors() {
+        // counter: 0, 1, 9 from RFC 4226 Appendix D table.
+        assert_eq!(hotp_cfg(0).generate_hotp(0).expect("c0"), "755224");
+        assert_eq!(hotp_cfg(1).generate_hotp(1).expect("c1"), "287082");
+        assert_eq!(hotp_cfg(9).generate_hotp(9).expect("c9"), "520489");
+    }
+
+    #[test]
+    fn hotp_uri_parse_generate_and_advance() {
+        let uri =
+            "otpauth://hotp/RFC:test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=1&issuer=RFC";
+        let cfg = TotpConfig::parse(uri).expect("parse hotp");
+        assert!(cfg.is_hotp());
+        assert_eq!(cfg.counter, Some(1));
+        assert_eq!(cfg.current_code().expect("code"), "287082");
+        let next = cfg.next_hotp_uri().expect("next uri");
+        assert!(next.contains("counter=2"));
+        assert!(next.starts_with("otpauth://hotp/"));
+        // generate_now on a HOTP config uses the stored counter (no clock).
+        assert_eq!(cfg.generate_now().expect("now").0, "287082");
     }
 }
